@@ -1,0 +1,70 @@
+export const PLACE_CATEGORIES = [
+  { id: 'all',           label: 'All',           emoji: '🌍' },
+  { id: 'Waterfalls',    label: 'Waterfalls',    emoji: '💧' },
+  { id: 'Temples',       label: 'Temples',       emoji: '🛕' },
+  { id: 'Beaches',       label: 'Beaches',       emoji: '🏖️' },
+  { id: 'Mountains',     label: 'Mountains',     emoji: '⛰️' },
+  { id: 'Forests',       label: 'Forests',       emoji: '🌲' },
+  { id: 'Historical',    label: 'Historical',    emoji: '🏛️' },
+  { id: 'Wildlife',      label: 'Wildlife',      emoji: '🐘' },
+  { id: 'Lakes',         label: 'Lakes',         emoji: '🏞️' },
+  { id: 'Caves',         label: 'Caves',         emoji: '🪨' },
+  { id: 'Parks',         label: 'Parks',         emoji: '🌿' },
+  { id: 'National Parks',label: 'National Parks',emoji: '🏕️' },
+  { id: 'Museums',       label: 'Museums',       emoji: '🏫' },
+  { id: 'Attractions',   label: 'Attractions',   emoji: '⭐' },
+  { id: 'Viewpoints',    label: 'Viewpoints',    emoji: '🔭' },
+  { id: 'Cities',        label: 'Cities',        emoji: '🏙️' },
+  { id: 'Villages',      label: 'Villages',      emoji: '🏘️' },
+  { id: 'Other',         label: 'Other',         emoji: '📍' },
+];
+
+export const CATEGORY_COLORS = {
+  Waterfalls:     '#3B82F6',
+  Temples:        '#F59E0B',
+  Beaches:        '#06B6D4',
+  Mountains:      '#8B5CF6',
+  Forests:        '#10B981',
+  Historical:     '#D97706',
+  Wildlife:       '#EF4444',
+  Lakes:          '#0EA5E9',
+  Caves:          '#6B7280',
+  Parks:          '#22C55E',
+  'National Parks':'#16A34A',
+  Museums:        '#EC4899',
+  Attractions:    '#F97316',
+  Viewpoints:     '#A78BFA',
+  Cities:         '#64748B',
+  Villages:       '#84CC16',
+  Other:          '#6B7280',
+};
+
+export const RATING_LABELS = {
+  1: 'Terrible',
+  2: 'Very Bad',
+  3: 'Bad',
+  4: 'Below Average',
+  5: 'Average',
+  6: 'Good',
+  7: 'Very Good',
+  8: 'Excellent',
+  9: 'Outstanding',
+  10: 'Perfect',
+};
+
+export const MAP_DEFAULTS = {
+  center: [20.5937, 78.9629], // India center
+  zoom: 5,
+  tileUrl: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+  tileAttribution:
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+};
+
+export const SORT_OPTIONS = [
+  { id: 'name_asc',   label: 'Name (A–Z)' },
+  { id: 'name_desc',  label: 'Name (Z–A)' },
+  { id: 'rating_desc',label: 'Top Rated' },
+  { id: 'recent',     label: 'Recently Added' },
+];
+
+export const PAGE_SIZE = 48;
