@@ -228,8 +228,6 @@ export default function MemoriesPage() {
             <MediaUpload
               userId={user?.id}
               onUploaded={(item) => setPendingMedia((prev) => [...prev, item])}
-              maxPhotos={10}
-              maxVideos={3}
             />
           </div>
         </div>

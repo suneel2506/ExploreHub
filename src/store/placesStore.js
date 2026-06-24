@@ -12,7 +12,7 @@ export const usePlacesStore = create((set, get) => ({
   searching: false,
   error: null,
 
-  /** Fetch first page of places with filters */
+  /** Fetch places with filters. reset=true clears existing results (new search). */
   fetchPlaces: async (filters = {}, reset = true) => {
     if (!supabase) return;
     const currentPage = reset ? 0 : get().page;
@@ -25,7 +25,10 @@ export const usePlacesStore = create((set, get) => ({
 
     let query = supabase
       .from('places')
-      .select('id,name,description,country,state,district,city,category,place_type,latitude,longitude,image_url,osm_id,source', { count: 'exact' })
+      .select(
+        'id,name,description,country,state,district,city,category,place_type,latitude,longitude,image_url,osm_id,source',
+        { count: 'exact' }
+      )
       .range(from, to);
 
     // Category filter
@@ -33,17 +36,23 @@ export const usePlacesStore = create((set, get) => ({
       query = query.eq('category', filters.category);
     }
 
-    // Full-text search
+    // Smart location-aware search:
+    //   • name ilike   → partial name match (e.g. "Kanchipuram" finds the city itself)
+    //   • city/district/state ilike → all places IN that location
+    //   • fts wfts     → full-text search across all indexed fields
+    // This means searching "Kanchipuram" returns:
+    //   - the city of Kanchipuram
+    //   - ALL temples/parks/etc. that have district='Kanchipuram'
     if (filters.search && filters.search.trim()) {
-      query = query.textSearch('fts', filters.search.trim(), {
-        type: 'websearch',
-        config: 'simple',
-      });
-    }
-
-    // State filter
-    if (filters.state) {
-      query = query.ilike('state', `%${filters.state}%`);
+      const term = filters.search.trim();
+      query = query.or(
+        [
+          `name.ilike.%${term}%`,
+          `city.ilike.%${term}%`,
+          `district.ilike.%${term}%`,
+          `state.ilike.%${term}%`,
+        ].join(',')
+      );
     }
 
     // Sort
@@ -72,12 +81,12 @@ export const usePlacesStore = create((set, get) => ({
     });
   },
 
-  /** Load next page (pagination) */
+  /** Load next page */
   loadMore: async (filters = {}) => {
     return get().fetchPlaces(filters, false);
   },
 
-  /** Fetch custom places for current user, merged into explore */
+  /** Fetch custom places for current user */
   fetchCustomPlaces: async (userId, filters = {}) => {
     if (!supabase || !userId) return;
     let query = supabase
@@ -87,10 +96,8 @@ export const usePlacesStore = create((set, get) => ({
       .order('created_at', { ascending: false });
 
     if (filters.search && filters.search.trim()) {
-      query = query.textSearch('fts', filters.search.trim(), {
-        type: 'websearch',
-        config: 'simple',
-      });
+      const term = filters.search.trim();
+      query = query.or(`name.ilike.%${term}%,city.ilike.%${term}%,district.ilike.%${term}%,state.ilike.%${term}%`);
     }
     if (filters.category && filters.category !== 'all') {
       query = query.eq('category', filters.category);
@@ -105,7 +112,7 @@ export const usePlacesStore = create((set, get) => ({
     if (!supabase) return [];
     const { data } = await supabase
       .from('places')
-      .select('id,name,category,latitude,longitude,image_url,state,district')
+      .select('id,name,category,latitude,longitude,image_url,state,district,city')
       .gte('latitude',  bounds.south)
       .lte('latitude',  bounds.north)
       .gte('longitude', bounds.west)

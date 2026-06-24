@@ -5,7 +5,7 @@ import { uploadPhoto, uploadVideo } from '@/lib/storage';
 const ACCEPT_IMAGES = 'image/jpeg,image/png,image/webp,image/gif';
 const ACCEPT_VIDEOS = 'video/mp4,video/quicktime,video/webm';
 
-export default function MediaUpload({ userId, onUploaded, maxPhotos = 10, maxVideos = 3, disabled = false }) {
+export default function MediaUpload({ userId, onUploaded, disabled = false }) {
   const [items, setItems]   = useState([]); // { file, type, preview, status, progress, url, path, error }
   const photoRef = useRef();
   const videoRef = useRef();
@@ -83,7 +83,7 @@ export default function MediaUpload({ userId, onUploaded, maxPhotos = 10, maxVid
         <button
           type="button"
           onClick={() => photoRef.current?.click()}
-          disabled={disabled || photos.length >= maxPhotos}
+          disabled={disabled}
           style={{
             display: 'flex', alignItems: 'center', gap: '7px',
             padding: '8px 14px',
@@ -92,17 +92,17 @@ export default function MediaUpload({ userId, onUploaded, maxPhotos = 10, maxVid
             borderRadius: 'var(--radius-md)',
             color: 'var(--color-text-secondary)',
             fontSize: '13px', cursor: 'pointer', fontFamily: 'inherit',
-            opacity: (disabled || photos.length >= maxPhotos) ? 0.5 : 1,
+            opacity: disabled ? 0.5 : 1,
             transition: 'all 150ms',
           }}
         >
-          <ImageIcon size={15} /> Add Photos ({photos.length}/{maxPhotos})
+          <ImageIcon size={15} /> Add Photos{photos.length > 0 ? ` (${photos.length})` : ''}
         </button>
 
         <button
           type="button"
           onClick={() => videoRef.current?.click()}
-          disabled={disabled || videos.length >= maxVideos}
+          disabled={disabled}
           style={{
             display: 'flex', alignItems: 'center', gap: '7px',
             padding: '8px 14px',
@@ -111,11 +111,11 @@ export default function MediaUpload({ userId, onUploaded, maxPhotos = 10, maxVid
             borderRadius: 'var(--radius-md)',
             color: 'var(--color-text-secondary)',
             fontSize: '13px', cursor: 'pointer', fontFamily: 'inherit',
-            opacity: (disabled || videos.length >= maxVideos) ? 0.5 : 1,
+            opacity: disabled ? 0.5 : 1,
             transition: 'all 150ms',
           }}
         >
-          <Video size={15} /> Add Videos ({videos.length}/{maxVideos})
+          <Video size={15} /> Add Videos{videos.length > 0 ? ` (${videos.length})` : ''}
         </button>
 
         {items.some((i) => i.status === 'pending') && (
