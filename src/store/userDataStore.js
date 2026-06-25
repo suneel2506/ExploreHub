@@ -20,15 +20,15 @@ export const useUserDataStore = create((set, get) => ({
     const [visited, wish, mems, med, custom, statsRes] = await Promise.all([
       supabase
         .from('visited_places')
-        .select('*, places(id,name,category,image_url,state,district)')
+        .select(`*, places(id,name,category,image_url,city_id)`)
         .eq('user_id', userId),
       supabase
         .from('wishlist')
-        .select('*, places(id,name,category,image_url,state,district)')
+        .select(`*, places(id,name,category,image_url,city_id)`)
         .eq('user_id', userId),
       supabase
         .from('memories')
-        .select('*, places(id,name,image_url,category,state), custom_places(id,name,category)')
+        .select('*, places(id,name,image_url,category), custom_places(id,name,category)')
         .eq('user_id', userId)
         .order('created_at', { ascending: false }),
       supabase
@@ -147,7 +147,7 @@ export const useUserDataStore = create((set, get) => ({
     const { data, error } = await supabase
       .from('memories')
       .insert(memory)
-      .select('*, places(id,name,image_url,category,state), custom_places(id,name,category)')
+      .select('*, places(id,name,image_url,category), custom_places(id,name,category)')
       .single();
     if (!error && data) {
       set((s) => ({ memories: [data, ...s.memories] }));
@@ -161,7 +161,7 @@ export const useUserDataStore = create((set, get) => ({
       .from('memories')
       .update({ ...updates, updated_at: new Date().toISOString() })
       .eq('id', id)
-      .select('*, places(id,name,image_url,category,state), custom_places(id,name,category)')
+      .select('*, places(id,name,image_url,category), custom_places(id,name,category)')
       .single();
     if (!error && data) {
       set((s) => ({ memories: s.memories.map((m) => (m.id === id ? data : m)) }));
@@ -184,11 +184,12 @@ export const useUserDataStore = create((set, get) => ({
    * Save a media record. Accepts either a real File to upload, or
    * pre-uploaded { url, storagePath, type } from the MediaUpload component.
    */
-  uploadMedia: async (file, userId, { memoryId, placeId, customPlaceId, caption, url: preUrl, storagePath: prePath, type: preType } = {}) => {
+  uploadMedia: async (file, userId, { memoryId, placeId, customPlaceId, caption, url: preUrl, storagePath: prePath, type: preType, thumbnailUrl: preThumbnail } = {}) => {
     if (!supabase) return { data: null, error: new Error('Not configured') };
 
     let url = preUrl;
     let storagePath = prePath;
+    let thumbnailUrl = preThumbnail || null;
     let isVideo = preType === 'video' || (file?.type ?? '').startsWith('video/');
     let bucket = isVideo ? 'videos' : 'photos';
 
@@ -198,6 +199,7 @@ export const useUserDataStore = create((set, get) => ({
       if (result.error) return { data: null, error: result.error };
       url = result.url;
       storagePath = result.path;
+      thumbnailUrl = result.thumbnailUrl || null;
     }
 
     if (!url) return { data: null, error: new Error('No URL to store') };
@@ -208,6 +210,7 @@ export const useUserDataStore = create((set, get) => ({
       url,
       storage_path:    storagePath || null,
       bucket,
+      thumbnail_url:   thumbnailUrl,
       caption:         caption        || null,
       file_size:       file?.size     || null,
       memory_id:       memoryId       || null,
@@ -232,6 +235,10 @@ export const useUserDataStore = create((set, get) => ({
 
   getMediaForMemory: (memoryId) => {
     return get().media.filter((m) => m.memory_id === memoryId);
+  },
+
+  getMediaForPlace: (placeId) => {
+    return get().media.filter((m) => m.place_id === placeId);
   },
 
   // ─── Custom Places ────────────────────────────────────────────────────────────

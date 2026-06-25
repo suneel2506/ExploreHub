@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
-import { Map, Search } from 'lucide-react';
+import { Map, Search, Navigation } from 'lucide-react';
 import { useMap } from 'react-leaflet';
 import MapView from '@/components/map/MapView';
 import PlaceDetailModal from '@/components/places/PlaceDetailModal';
@@ -17,7 +17,7 @@ function useDebounce(value, delay) {
 }
 
 export default function MapPage() {
-  const { fetchPlacesByBounds } = usePlacesStore();
+  const { fetchPlacesByBounds, resolveLocation } = usePlacesStore();
   const { visitedPlaces, wishlist, customPlaces } = useUserDataStore();
   const { user } = useAuthStore();
 
@@ -29,6 +29,7 @@ export default function MapPage() {
   const [statusFilter, setStatusFilter]       = useState('all');
   const [mapBounds, setMapBounds]             = useState(null);
   const [loadingMap, setLoadingMap]           = useState(false);
+  const [searchResult, setSearchResult]       = useState(null);
 
   const debouncedSearch = useDebounce(search, 350);
 
@@ -45,6 +46,28 @@ export default function MapPage() {
   }, [fetchPlacesByBounds]);
 
   useEffect(() => { if (mapBounds) loadByBounds(mapBounds); }, [mapBounds]);
+
+  // Server-side search: resolve location and fly to it
+  useEffect(() => {
+    if (!debouncedSearch || debouncedSearch.length < 2) {
+      setSearchResult(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      const result = await resolveLocation(debouncedSearch);
+      if (cancelled) return;
+      if (result) {
+        setSearchResult(result);
+        setFlyTo({ latitude: result.lat, longitude: result.lon, _zoom: result.zoom });
+      } else {
+        setSearchResult(null);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [debouncedSearch, resolveLocation]);
 
   // Combine official + custom places
   const allPlaces = useMemo(() => [
@@ -88,7 +111,7 @@ export default function MapPage() {
             <Search size={13} style={{ position: 'absolute', left: 9, top: '50%', transform: 'translateY(-50%)', color: 'var(--color-text-muted)', pointerEvents: 'none' }} />
             <input
               id="map-search"
-              placeholder="Search visible places..."
+              placeholder="Search city, state, or place..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{ width: '100%', padding: '8px 10px 8px 28px', background: 'var(--color-bg-tertiary)', border: '1px solid var(--color-border)', borderRadius: 'var(--radius-md)', color: 'var(--color-text-primary)', fontSize: '13px', fontFamily: 'inherit', outline: 'none' }}
@@ -96,6 +119,19 @@ export default function MapPage() {
               onBlur={(e) => e.target.style.borderColor = 'var(--color-border)'}
             />
           </div>
+
+          {/* Search resolution result */}
+          {searchResult && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px', background: 'var(--color-accent-muted)', borderRadius: 'var(--radius-md)', marginBottom: '8px', fontSize: '12px' }}>
+              <Navigation size={12} color="var(--color-accent)" />
+              <span style={{ color: 'var(--color-accent)', fontWeight: 500 }}>
+                {searchResult.type === 'city' ? '🏙️' : searchResult.type === 'state' ? '🗺️' : searchResult.type === 'district' ? '📍' : '📌'} {searchResult.name}
+              </span>
+              <span style={{ color: 'var(--color-text-muted)', fontSize: '10px', marginLeft: 'auto' }}>
+                {searchResult.type}
+              </span>
+            </div>
+          )}
 
           {/* Status filter pills */}
           <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap', marginBottom: '8px' }}>
@@ -148,7 +184,7 @@ export default function MapPage() {
                       {place._isCustom && <span style={{ fontSize: '10px', color: 'var(--color-accent)', marginLeft: 5 }}>CUSTOM</span>}
                     </p>
                     <p style={{ fontSize: '11px', color: 'var(--color-text-muted)', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {[place.district, place.state].filter(Boolean).join(', ') || place.category}
+                      {[place.district_name || place.district, place.state_name || place.state].filter(Boolean).join(', ') || place.category}
                     </p>
                     <div style={{ display: 'flex', gap: '4px', marginTop: '4px' }}>
                       <Badge category={place.category} />

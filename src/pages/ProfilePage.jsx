@@ -150,8 +150,10 @@ export default function ProfilePage() {
                 { label: 'Countries', value: stats?.countries_explored ?? 0, icon: <Globe size={20} color="#3B82F6" />, color: '#3B82F6' },
                 { label: 'States', value: stats?.states_explored ?? 0, icon: <MapPin size={20} color="#8B5CF6" />, color: '#8B5CF6' },
                 { label: 'Districts', value: stats?.districts_explored ?? 0, icon: <MapPin size={20} color="#F59E0B" />, color: '#F59E0B' },
+                { label: 'Cities', value: stats?.cities_explored ?? 0, icon: <MapPin size={20} color="#06B6D4" />, color: '#06B6D4' },
                 { label: 'Memories', value: stats?.memory_count ?? 0, icon: <BookOpen size={20} color="#EC4899" />, color: '#EC4899' },
                 { label: 'Photos', value: stats?.photo_count ?? 0, icon: <Camera size={20} color="#06B6D4" />, color: '#06B6D4' },
+                { label: 'Wishlist', value: stats?.wishlist_count ?? 0, icon: <Star size={20} color="#F59E0B" />, color: '#F59E0B' },
               ].map((stat) => (
                 <div
                   key={stat.label}

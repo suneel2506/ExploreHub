@@ -25,9 +25,10 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
 
   if (!place) return null;
 
-  const district = place.districts;
-  const state = district?.states;
-  const country = state?.countries;
+  const district = place.district_name || place.districts?.name;
+  const state    = place.state_name    || place.districts?.states?.name;
+  const country  = place.country_name  || place.districts?.states?.countries?.name;
+  const countryFlag = place.country_flag || place.districts?.states?.countries?.flag_emoji;
 
   const handleVisit = async () => {
     if (!user) return;
@@ -119,8 +120,8 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
           {(district || country) && (
             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '13px', color: 'var(--color-text-muted)', marginLeft: 'auto' }}>
               <MapPin size={13} />
-              {[district?.name, state?.name, country?.name].filter(Boolean).join(', ')}
-              {country?.flag_emoji && <span>{country.flag_emoji}</span>}
+              {[district, state, country].filter(Boolean).join(', ')}
+              {countryFlag && <span>{countryFlag}</span>}
             </div>
           )}
         </div>

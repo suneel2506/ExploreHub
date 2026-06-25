@@ -41,6 +41,7 @@ const CATEGORY_GRADIENTS = {
   Forests:         'linear-gradient(135deg, #14532d 0%, #16a34a 100%)',
   Temples:         'linear-gradient(135deg, #78350f 0%, #d97706 100%)',
   Historical:      'linear-gradient(135deg, #431407 0%, #b45309 100%)',
+  Forts:           'linear-gradient(135deg, #451a03 0%, #92400e 100%)',
   Museums:         'linear-gradient(135deg, #1e1b4b 0%, #7c3aed 100%)',
   'National Parks':'linear-gradient(135deg, #14532d 0%, #22c55e 100%)',
   Parks:           'linear-gradient(135deg, #166534 0%, #4ade80 100%)',
@@ -48,6 +49,13 @@ const CATEGORY_GRADIENTS = {
   Caves:           'linear-gradient(135deg, #1c1917 0%, #57534e 100%)',
   Viewpoints:      'linear-gradient(135deg, #0f172a 0%, #334155 50%, #f59e0b 100%)',
   Attractions:     'linear-gradient(135deg, #4a044e 0%, #a21caf 100%)',
+  Mosques:         'linear-gradient(135deg, #064e3b 0%, #059669 100%)',
+  Churches:        'linear-gradient(135deg, #2e1065 0%, #7c3aed 100%)',
+  Gurudwaras:      'linear-gradient(135deg, #78350f 0%, #e88d2a 100%)',
+  Monasteries:     'linear-gradient(135deg, #4a044e 0%, #d946ef 100%)',
+  Dams:            'linear-gradient(135deg, #0c4a6e 0%, #0284c7 100%)',
+  Islands:         'linear-gradient(135deg, #134e4a 0%, #14b8a6 100%)',
+  Bridges:         'linear-gradient(135deg, #1e293b 0%, #64748b 100%)',
   Cities:          'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
   Villages:        'linear-gradient(135deg, #365314 0%, #84cc16 100%)',
   Other:           'linear-gradient(135deg, #1e293b 0%, #475569 100%)',
@@ -55,9 +63,12 @@ const CATEGORY_GRADIENTS = {
 
 const CATEGORY_EMOJIS = {
   Waterfalls: '💧', Beaches: '🏖️', Mountains: '⛰️', Lakes: '🏞️',
-  Forests: '🌲', Temples: '🛕', Historical: '🏛️', Museums: '🏫',
-  'National Parks': '🏕️', Parks: '🌿', Wildlife: '🐘', Caves: '🪨',
-  Viewpoints: '🔭', Attractions: '⭐', Cities: '🏙️', Villages: '🏘️', Other: '📍',
+  Forests: '🌲', Temples: '🛕', Historical: '🏛️', Forts: '🏰',
+  Museums: '🏫', 'National Parks': '🏕️', Parks: '🌿', Wildlife: '🐘',
+  Caves: '🪨', Viewpoints: '🔭', Attractions: '⭐',
+  Mosques: '🕌', Churches: '⛪', Gurudwaras: '🙏', Monasteries: '🧘',
+  Dams: '🌊', Islands: '🏝️', Bridges: '🌉',
+  Cities: '🏙️', Villages: '🏘️', Other: '📍',
 };
 
 /**
@@ -137,7 +148,7 @@ export default function PlaceCard({ place, onClick }) {
     setBusy(false);
   };
 
-  const locationLine = [place.city, place.district, place.state].filter(Boolean).join(' · ');
+  const locationLine = [place.city_name || place.city, place.district_name || place.district, place.state_name || place.state].filter(Boolean).join(' · ');
   const gradient     = CATEGORY_GRADIENTS[place.category] || CATEGORY_GRADIENTS.Other;
   const emoji        = CATEGORY_EMOJIS[place.category]    || '📍';
 
