@@ -22,6 +22,8 @@ export const PLACE_CATEGORIES = [
   { id: 'Dams',          label: 'Dams',          emoji: '🌊' },
   { id: 'Islands',       label: 'Islands',       emoji: '🏝️' },
   { id: 'Bridges',       label: 'Bridges',       emoji: '🌉' },
+  { id: 'Airports',      label: 'Airports',      emoji: '✈️' },
+  { id: 'Railway Stations', label: 'Railway Stations', emoji: '🚂' },
   { id: 'Cities',        label: 'Cities',        emoji: '🏙️' },
   { id: 'Villages',      label: 'Villages',      emoji: '🏘️' },
   { id: 'Other',         label: 'Other',         emoji: '📍' },
@@ -49,10 +51,12 @@ export const CATEGORY_COLORS = {
   Monasteries:    '#D946EF',
   Dams:           '#0284C7',
   Islands:        '#14B8A6',
-  Bridges:        '#64748B',
-  Cities:         '#64748B',
-  Villages:       '#84CC16',
-  Other:          '#6B7280',
+  Bridges:           '#64748B',
+  Airports:          '#3B82F6',
+  'Railway Stations': '#9333EA',
+  Cities:            '#64748B',
+  Villages:          '#84CC16',
+  Other:             '#6B7280',
 };
 
 export const RATING_LABELS = {

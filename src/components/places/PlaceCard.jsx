@@ -56,6 +56,8 @@ const CATEGORY_GRADIENTS = {
   Dams:            'linear-gradient(135deg, #0c4a6e 0%, #0284c7 100%)',
   Islands:         'linear-gradient(135deg, #134e4a 0%, #14b8a6 100%)',
   Bridges:         'linear-gradient(135deg, #1e293b 0%, #64748b 100%)',
+  Airports:        'linear-gradient(135deg, #1e3a5f 0%, #3b82f6 100%)',
+  'Railway Stations':'linear-gradient(135deg, #4c1d95 0%, #9333ea 100%)',
   Cities:          'linear-gradient(135deg, #0f172a 0%, #1e293b 100%)',
   Villages:        'linear-gradient(135deg, #365314 0%, #84cc16 100%)',
   Other:           'linear-gradient(135deg, #1e293b 0%, #475569 100%)',
@@ -68,6 +70,7 @@ const CATEGORY_EMOJIS = {
   Caves: '🪨', Viewpoints: '🔭', Attractions: '⭐',
   Mosques: '🕌', Churches: '⛪', Gurudwaras: '🙏', Monasteries: '🧘',
   Dams: '🌊', Islands: '🏝️', Bridges: '🌉',
+  Airports: '✈️', 'Railway Stations': '🚂',
   Cities: '🏙️', Villages: '🏘️', Other: '📍',
 };
 
