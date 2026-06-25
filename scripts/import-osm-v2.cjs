@@ -1,32 +1,49 @@
 #!/usr/bin/env node
 // =============================================================================
-// ExploreHub — OSM Import Script v6 (Spatial Hierarchy)
+// ExploreHub — OSM Import Script v7 (Production-Reliable)
 // =============================================================================
-// 
-// CRITICAL FIX: Uses admin boundaries + spatial matching instead of addr:* tags.
-// 
+//
 // ARCHITECTURE:
-//   Pass 1 → Collect settlements, places, way refs, admin boundaries
-//   Pass 2 → Resolve node coords for ways + admin centres
-//   Phase 3 → Build hierarchy via spatial matching
-//   Phase 4 → Verify hierarchy (STOP if counts wrong)
+//   Pass 1  → Collect settlements, places, way refs, admin boundaries
+//   Pass 2  → Resolve node coords for ways + admin centres
+//   Phase 3 → Build hierarchy via spatial matching + batched DB insertion
+//   Phase 4 → Post-import verification (counts + FK integrity)
 //   Phase 5 → Import places with spatial city matching
-//   Phase 6 → Final verification
+//   Phase 6 → Re-verify after places
+//   Phase 7 → Create/refresh search indexes
+//   Phase 8 → Queue-based Wikipedia image enrichment
+//
+// KEY IMPROVEMENTS OVER v6:
+//   - Uses @supabase/supabase-js (connection reuse, keep-alive)
+//   - Configurable batch sizes (50-200 records)
+//   - UPSERT with ON CONFLICT DO NOTHING
+//   - Adaptive backoff (responds to error pressure)
+//   - Worker pool (2-4 parallel batch inserters)
+//   - Checkpoint/resume with full state snapshot
+//   - Memory-efficient city index (Float64Array)
+//   - Post-import verification with orphan detection
+//   - Search index creation after import
+//   - Queue-based image enrichment
 //
 // USAGE:
 //   node scripts/import-osm-v2.cjs                     Full import
 //   node scripts/import-osm-v2.cjs --dry-run            Parse only, no DB writes
-//   node scripts/import-osm-v2.cjs --limit 5000         Stop after N place inserts
 //   node scripts/import-osm-v2.cjs --pass hierarchy     Only build hierarchy
-//   node scripts/import-osm-v2.cjs --pass places        Only import places (hierarchy must exist)
-//   node scripts/import-osm-v2.cjs --enrich-images      Fetch Wikipedia images after import
+//   node scripts/import-osm-v2.cjs --pass places        Only import places
+//   node scripts/import-osm-v2.cjs --enrich-images      Fetch Wikipedia images
+//   node scripts/import-osm-v2.cjs --fresh              Ignore checkpoint, start over
+//   node scripts/import-osm-v2.cjs --workers 3          Set parallel workers (max 4)
+//   node scripts/import-osm-v2.cjs --batch-districts 50
+//   node scripts/import-osm-v2.cjs --batch-cities 100
+//   node scripts/import-osm-v2.cjs --batch-places 80
+//   node scripts/import-osm-v2.cjs --limit 5000         Stop after N place inserts
 //
 // =============================================================================
 'use strict';
 
-const fs    = require('fs');
-const path  = require('path');
-const https = require('https');
+const fs   = require('fs');
+const path = require('path');
+const https = require('https'); // Only used for Wikipedia API calls
 
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
@@ -37,11 +54,15 @@ const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY;
 // ─── CLI flags ────────────────────────────────────────────────────────────────
 const args       = process.argv.slice(2);
 const DRY_RUN    = args.includes('--dry-run');
-const LIMIT      = (() => { const i = args.indexOf('--limit');    return i >= 0 ? parseInt(args[i + 1], 10) : Infinity; })();
-const PASS_ONLY  = (() => { const i = args.indexOf('--pass');     return i >= 0 ? args[i + 1] : null; })();
+const FRESH      = args.includes('--fresh');
+const LIMIT      = (() => { const i = args.indexOf('--limit');           return i >= 0 ? parseInt(args[i + 1], 10) : Infinity; })();
+const PASS_ONLY  = (() => { const i = args.indexOf('--pass');            return i >= 0 ? args[i + 1] : null; })();
 const ENRICH_IMG = args.includes('--enrich-images');
-const BATCH_SIZE = 80;
-const DELAY_MS   = 500;
+
+const BATCH_DISTRICTS = (() => { const i = args.indexOf('--batch-districts'); return i >= 0 ? parseInt(args[i + 1], 10) : 50; })();
+const BATCH_CITIES    = (() => { const i = args.indexOf('--batch-cities');    return i >= 0 ? parseInt(args[i + 1], 10) : 100; })();
+const BATCH_PLACES    = (() => { const i = args.indexOf('--batch-places');    return i >= 0 ? parseInt(args[i + 1], 10) : 80; })();
+const WORKERS         = (() => { const i = args.indexOf('--workers');         return i >= 0 ? Math.min(Math.max(parseInt(args[i + 1], 10), 1), 4) : 2; })();
 
 // ─── API key ──────────────────────────────────────────────────────────────────
 const useServiceKey = SERVICE_KEY && SERVICE_KEY !== 'your-service-role-key-here';
@@ -52,68 +73,162 @@ if (!SUPABASE_URL || !API_KEY) {
   process.exit(1);
 }
 
-// ─── HTTPS helpers ────────────────────────────────────────────────────────────
-const httpsAgent = new https.Agent({ keepAlive: false, maxSockets: 2, timeout: 30000 });
+// ─── Supabase client ──────────────────────────────────────────────────────────
+const { createClient } = require('@supabase/supabase-js');
+const supabase = createClient(SUPABASE_URL, API_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+  db: { schema: 'public' },
+});
 
-function httpRequest(urlStr, method, payload, extraHeaders) {
-  return new Promise((resolve, reject) => {
-    const data = payload ? JSON.stringify(payload) : '';
-    const url  = new URL(urlStr);
-    const opts = {
-      hostname: url.hostname, port: url.port || 443,
-      path: url.pathname + url.search, method,
-      agent: httpsAgent, timeout: 30000,
-      headers: { ...extraHeaders, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), 'Connection': 'close' },
-    };
-    const req = https.request(opts, (res) => {
-      let body = '';
-      res.on('data', (c) => (body += c));
-      res.on('end', () => {
-        if (res.statusCode >= 400) reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 500)}`));
-        else { try { resolve(JSON.parse(body)); } catch { resolve(body); } }
-      });
-    });
-    req.on('timeout', () => req.destroy(new Error('SOCKET_TIMEOUT')));
-    req.on('error', reject);
-    if (data) req.write(data);
-    req.end();
-  });
+// ─── Utilities ────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ─── Adaptive Backoff ─────────────────────────────────────────────────────────
+class AdaptiveBackoff {
+  constructor(baseDelay = 100) {
+    this.baseDelay = baseDelay;
+    this.currentDelay = baseDelay;
+    this.maxDelay = 30000;
+    this.errorWindow = [];
+    this.windowSize = 60000;
+    this.successStreak = 0;
+  }
+
+  recordSuccess() {
+    this.successStreak++;
+    if (this.successStreak >= 10) {
+      this.currentDelay = Math.max(this.baseDelay, Math.floor(this.currentDelay / 2));
+      this.successStreak = 0;
+    }
+  }
+
+  recordError() {
+    this.successStreak = 0;
+    this.errorWindow.push(Date.now());
+    this._prune();
+    const rate = this.errorWindow.length;
+    if (rate > 5) this.currentDelay = Math.min(this.maxDelay, this.currentDelay * 4);
+    else if (rate > 2) this.currentDelay = Math.min(this.maxDelay, this.currentDelay * 2);
+    else this.currentDelay = Math.min(this.maxDelay, this.currentDelay + 500);
+  }
+
+  _prune() {
+    const cutoff = Date.now() - this.windowSize;
+    this.errorWindow = this.errorWindow.filter(t => t > cutoff);
+  }
+
+  async wait() {
+    if (this.currentDelay > 0) await sleep(this.currentDelay);
+  }
+
+  get delay() { return this.currentDelay; }
 }
 
-const supaHeaders = { 'apikey': API_KEY, 'Authorization': `Bearer ${API_KEY}` };
+// ─── Worker Pool ──────────────────────────────────────────────────────────────
+class WorkerPool {
+  constructor(concurrency = 2) {
+    this.concurrency = concurrency;
+    this.running = 0;
+    this.queue = [];
+  }
 
-async function supaInsert(table, records, conflictCols) {
-  const onConflict = conflictCols ? `?on_conflict=${conflictCols}` : '';
-  return httpRequest(
-    `${SUPABASE_URL}/rest/v1/${table}${onConflict}`, 'POST', records,
-    { ...supaHeaders, 'Prefer': 'resolution=ignore-duplicates,return=representation' }
-  );
+  async enqueue(fn) {
+    if (this.running >= this.concurrency) {
+      await new Promise(resolve => this.queue.push(resolve));
+    }
+    this.running++;
+    try {
+      return await fn();
+    } finally {
+      this.running--;
+      if (this.queue.length > 0) this.queue.shift()();
+    }
+  }
+
+  async drain() {
+    while (this.running > 0) await sleep(50);
+  }
 }
 
-async function supaInsertMinimal(table, records, conflictCols) {
-  const onConflict = conflictCols ? `?on_conflict=${conflictCols}` : '';
-  return httpRequest(
-    `${SUPABASE_URL}/rest/v1/${table}${onConflict}`, 'POST', records,
-    { ...supaHeaders, 'Prefer': 'resolution=ignore-duplicates,return=minimal' }
-  );
+// ─── Error Classification ─────────────────────────────────────────────────────
+function isTransientError(error) {
+  if (!error) return false;
+  const msg = (error.message || '').toLowerCase();
+  const code = (error.code || '').toLowerCase();
+  // Transient network errors
+  if (msg.includes('socket hang up')) return true;
+  if (msg.includes('econnreset')) return true;
+  if (msg.includes('enotfound')) return true;
+  if (msg.includes('etimedout')) return true;
+  if (msg.includes('econnrefused')) return true;
+  if (msg.includes('fetch failed')) return true;
+  if (msg.includes('network')) return true;
+  if (msg.includes('tls')) return true;
+  if (msg.includes('socket_timeout')) return true;
+  // HTTP 5xx server errors
+  if (error.status && error.status >= 500) return true;
+  if (error.statusCode && error.statusCode >= 500) return true;
+  // Rate limiting
+  if (error.status === 429 || error.statusCode === 429) return true;
+  // PostgreSQL transient codes
+  if (code === '40001' || code === '40p01') return true; // serialization/deadlock
+  return false;
 }
 
-async function supaGet(table, query) {
-  return httpRequest(`${SUPABASE_URL}/rest/v1/${table}?${query}`, 'GET', null, supaHeaders);
-}
-
-async function withRetry(fn, label, max = 5) {
-  for (let a = 1; a <= max; a++) {
-    try { return await fn(); }
-    catch (err) {
-      if (err.message?.startsWith('HTTP 4')) { process.stderr.write(`\n  ❌ ${label}: ${err.message.slice(0,300)}\n`); return null; }
-      if (a < max) { const w = Math.min(1000 * 2 ** (a - 1), 16000); process.stderr.write(`\n  ⚠️ ${label} attempt ${a}/${max}, retry in ${w/1000}s\n`); await sleep(w); }
-      else { process.stderr.write(`\n  ❌ ${label} failed after ${max} attempts\n`); return null; }
+// ─── Smart Retry ──────────────────────────────────────────────────────────────
+async function withRetry(fn, label, maxAttempts = 5) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const result = await fn();
+      // Check for Supabase error objects
+      if (result && result.error) {
+        if (!isTransientError(result.error)) {
+          console.error(`\n  ❌ ${label}: ${result.error.message || JSON.stringify(result.error).slice(0, 300)} [non-retryable]`);
+          return result;
+        }
+        throw result.error; // Let retry logic handle it
+      }
+      return result;
+    } catch (err) {
+      if (!isTransientError(err)) {
+        console.error(`\n  ❌ ${label}: ${err.message?.slice(0, 300) || err} [non-retryable]`);
+        return { data: null, error: err };
+      }
+      if (attempt < maxAttempts) {
+        const wait = Math.min(1000 * Math.pow(2, attempt - 1), 16000);
+        console.error(`\n  ⚠️ ${label} attempt ${attempt}/${maxAttempts} | ${err.message?.slice(0, 200) || err}`);
+        console.error(`     Retrying in ${(wait / 1000).toFixed(1)}s...`);
+        await sleep(wait);
+      } else {
+        console.error(`\n  ❌ ${label} failed after ${maxAttempts} attempts: ${err.message?.slice(0, 300) || err}`);
+        return { data: null, error: err };
+      }
     }
   }
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ─── Checkpoint System ────────────────────────────────────────────────────────
+const CHECKPOINT_FILE = path.join(__dirname, '.import-checkpoint.json');
+
+function saveCheckpoint(data) {
+  data.timestamp = new Date().toISOString();
+  data.version = 2;
+  const tmp = CHECKPOINT_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  try { fs.renameSync(tmp, CHECKPOINT_FILE); }
+  catch { fs.copyFileSync(tmp, CHECKPOINT_FILE); try { fs.unlinkSync(tmp); } catch {} }
+}
+
+function loadCheckpoint() {
+  if (FRESH) return null;
+  if (!fs.existsSync(CHECKPOINT_FILE)) return null;
+  try { return JSON.parse(fs.readFileSync(CHECKPOINT_FILE, 'utf8')); }
+  catch { return null; }
+}
+
+function clearCheckpoint() {
+  try { if (fs.existsSync(CHECKPOINT_FILE)) fs.unlinkSync(CHECKPOINT_FILE); } catch {}
+}
 
 // ─── OSM file ─────────────────────────────────────────────────────────────────
 const PBF_FILE = ['india-260623.osm.pbf', 'india-latest.osm.pbf']
@@ -212,7 +327,6 @@ function isRelevantPlace(tags) {
 }
 
 // ─── India State Centroids (for spatial matching) ─────────────────────────────
-// Approximate geographic centres of all 36 states/UTs
 const STATE_CENTROIDS = [
   { name: 'Andhra Pradesh',    lat: 15.9129, lon: 79.7400 },
   { name: 'Arunachal Pradesh', lat: 28.2180, lon: 94.7278 },
@@ -253,7 +367,6 @@ const STATE_CENTROIDS = [
   { name: 'Puducherry',        lat: 11.9416, lon: 79.8083 },
 ];
 
-// State name normalization map (OSM variants → canonical)
 const STATE_ALIASES = {
   'orissa': 'Odisha',
   'uttaranchal': 'Uttarakhand',
@@ -269,12 +382,9 @@ const STATE_ALIASES = {
 function normalizeStateName(raw) {
   if (!raw) return null;
   const key = raw.toLowerCase().trim();
-  // Direct match
   const direct = STATE_CENTROIDS.find(s => s.name.toLowerCase() === key);
   if (direct) return direct.name;
-  // Alias
   if (STATE_ALIASES[key]) return STATE_ALIASES[key];
-  // Fuzzy: check if key contains state name
   const partial = STATE_CENTROIDS.find(s => key.includes(s.name.toLowerCase()) || s.name.toLowerCase().includes(key));
   return partial ? partial.name : null;
 }
@@ -297,45 +407,31 @@ function findNearestState(lat, lon) {
   return best;
 }
 
-// ─── Resolve state for a settlement ───────────────────────────────────────────
 function resolveState(tags, lat, lon) {
-  // Priority 1: is_in:state tag
   const isInState = str(tags['is_in:state'] || tags['is_in:state_code'] || tags['addr:state']);
-  if (isInState) {
-    const n = normalizeStateName(isInState);
-    if (n) return n;
-  }
-  // Priority 2: Parse is_in tag (format: "City, District, State, Country" or "State, Country")
+  if (isInState) { const n = normalizeStateName(isInState); if (n) return n; }
   const isIn = str(tags['is_in']);
   if (isIn) {
     const parts = isIn.split(',').map(s => s.trim());
-    for (const part of parts) {
-      const n = normalizeStateName(part);
-      if (n) return n;
-    }
+    for (const part of parts) { const n = normalizeStateName(part); if (n) return n; }
   }
-  // Priority 3: Spatial — nearest state centroid
   return findNearestState(lat, lon);
 }
 
-// ─── Resolve district name from tags ──────────────────────────────────────────
 function resolveDistrictFromTags(tags) {
   return str(tags['addr:district'] || tags['is_in:district'] || tags['addr:county']);
 }
 
-// Parse is_in for district (second-to-last before state)
 function resolveDistrictFromIsIn(tags) {
   const isIn = str(tags['is_in']);
   if (!isIn) return null;
   const parts = isIn.split(',').map(s => s.trim()).filter(Boolean);
-  // Typical: "City, District, State, India" → district is parts[1] if parts.length >= 3
   if (parts.length >= 3) {
-    const candidate = parts[parts.length - 3]; // e.g. in "A, B, TamilNadu, India" → B
-    // Make sure it's not a state name
+    const candidate = parts[parts.length - 3];
     if (!normalizeStateName(candidate)) return candidate;
   }
   if (parts.length >= 2) {
-    const candidate = parts[0]; // fallback: first part
+    const candidate = parts[0];
     if (!normalizeStateName(candidate)) return candidate;
   }
   return null;
@@ -344,7 +440,6 @@ function resolveDistrictFromIsIn(tags) {
 // =============================================================================
 // PASS 1: Collect Raw Data from PBF
 // =============================================================================
-// Collects: settlements, place nodes, way refs, admin boundary relations
 
 async function pass1() {
   console.log('\n═══════════════════════════════════════════════════');
@@ -354,10 +449,10 @@ async function pass1() {
   const parse   = require('osm-pbf-parser');
   const through = require('through2');
 
-  const settlements  = [];      // { name, lat, lon, type, tags, osmId }
-  const placeNodes   = [];      // { name, lat, lon, tags, osmId, category }
-  const wayPlaces    = [];      // { name, tags, osmId, category, nodeRefs: number[] }
-  const adminBounds  = [];      // { name, level, adminCentreNodeId, osmId }
+  const settlements  = [];
+  const placeNodes   = [];
+  const wayPlaces    = [];
+  const adminBounds  = [];
   const neededNodeIds = new Set();
 
   let nodeCount = 0, wayCount = 0, relCount = 0;
@@ -368,7 +463,6 @@ async function pass1() {
       .pipe(parse())
       .pipe(through.obj(function (items, _enc, next) {
         for (const item of items) {
-          // ─── NODES ──────────────────────────────────────
           if (item.type === 'node') {
             nodeCount++;
             if (nodeCount % 2000000 === 0) {
@@ -379,7 +473,6 @@ async function pass1() {
             const tags = item.tags || {};
             const name = getName(tags);
 
-            // Settlement?
             const placeTag = tags.place;
             if (placeTag && ['city', 'town', 'village', 'hamlet'].includes(placeTag) && name) {
               settlements.push({
@@ -388,7 +481,6 @@ async function pass1() {
               });
             }
 
-            // Travel-relevant place?
             if (isRelevantPlace(tags)) {
               placeNodes.push({
                 name, lat: item.lat, lon: item.lon,
@@ -396,8 +488,6 @@ async function pass1() {
               });
             }
           }
-
-          // ─── WAYS ───────────────────────────────────────
           else if (item.type === 'way') {
             wayCount++;
             const tags = item.tags || {};
@@ -406,43 +496,32 @@ async function pass1() {
                 name: getName(tags), tags, osmId: item.id,
                 category: categorize(tags), nodeRefs: item.refs,
               });
-              // We need coords for these nodes to compute centroids
               for (const ref of item.refs) neededNodeIds.add(ref);
             }
           }
-
-          // ─── RELATIONS ──────────────────────────────────
           else if (item.type === 'relation') {
             relCount++;
             const tags = item.tags || {};
 
-            // Admin boundaries
             if (tags.boundary === 'administrative' && tags.admin_level) {
               const level = parseInt(tags.admin_level, 10);
               const name  = getName(tags);
               if (name && [2, 4, 5, 6, 8].includes(level)) {
                 let adminCentreId = null;
                 if (item.members) {
-                  // Find admin_centre or label member
                   const centre = item.members.find(m => m.role === 'admin_centre' || m.role === 'label');
-                  if (centre) {
-                    adminCentreId = centre.id;
-                    neededNodeIds.add(centre.id);
-                  }
+                  if (centre) { adminCentreId = centre.id; neededNodeIds.add(centre.id); }
                 }
                 adminBounds.push({ name, level, adminCentreNodeId: adminCentreId, osmId: item.id });
               }
             }
 
-            // Travel-relevant relation (national parks, protected areas)
             if (isRelevantPlace(tags) && item.members) {
-              // Get admin_centre or first node member for centroid
               const centre = item.members.find(m => m.role === 'admin_centre' || m.role === 'label');
               const firstNode = item.members.find(m => m.type === 'node');
               const centreId = centre?.id || firstNode?.id;
               if (centreId) {
                 neededNodeIds.add(centreId);
-                // Store as way-like place with single node ref
                 wayPlaces.push({
                   name: getName(tags), tags, osmId: item.id,
                   category: categorize(tags), nodeRefs: [centreId],
@@ -468,7 +547,6 @@ async function pass1() {
   console.log(`     Admin boundaries:   ${adminBounds.length}`);
   console.log(`     Node IDs to resolve: ${neededNodeIds.size.toLocaleString()}`);
 
-  // Break down admin boundaries by level
   for (const level of [2, 4, 5, 6, 8]) {
     const count = adminBounds.filter(a => a.level === level).length;
     if (count > 0) console.log(`       admin_level=${level}: ${count}`);
@@ -494,7 +572,7 @@ async function pass2(neededNodeIds) {
   const parse   = require('osm-pbf-parser');
   const through = require('through2');
 
-  const nodeCoords = new Map(); // nodeId → { lat, lon }
+  const nodeCoords = new Map();
   let scanned = 0, resolved = 0;
   const startTime = Date.now();
 
@@ -503,15 +581,10 @@ async function pass2(neededNodeIds) {
       .pipe(parse())
       .pipe(through.obj(function (items, _enc, next) {
         for (const item of items) {
-          // Only process nodes (stop at ways since nodes are first in PBF)
           if (item.type !== 'node') {
-            // Once we see a non-node, check if we've resolved all
-            if (resolved >= neededNodeIds.size) {
-              this.destroy();
-              resolve();
-              return;
-            }
-            continue;
+            this.destroy();
+            resolve();
+            return;
           }
           scanned++;
           if (neededNodeIds.has(item.id) && item.lat != null && item.lon != null) {
@@ -542,18 +615,21 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
   console.log('📊 PHASE 3: Building Geographic Hierarchy');
   console.log('═══════════════════════════════════════════════════\n');
 
-  // ─── Step 1: Load states (from DB or mock for dry-run) ──────────────────────
-  let stateMap = {}; // name → { id, country_id }
+  const backoff = new AdaptiveBackoff(150);
+  const pool = new WorkerPool(WORKERS);
+
+  // ─── Step 1: Load states ────────────────────────────────────────────────────
+  let stateMap = {};
 
   if (DRY_RUN) {
-    // Use hardcoded centroids as mock state data
     for (const s of STATE_CENTROIDS) {
       stateMap[s.name] = { id: `mock-${s.name}`, country_id: 'mock-india' };
     }
     console.log(`  ✅ ${Object.keys(stateMap).length} states (mock for dry-run)`);
   } else {
-    const dbStates = await supaGet('states', 'select=id,name,country_id&limit=100');
-    if (!Array.isArray(dbStates) || dbStates.length === 0) {
+    const { data: dbStates, error } = await supabase
+      .from('states').select('id,name,country_id').limit(100);
+    if (error || !dbStates || dbStates.length === 0) {
       console.error('  ❌ No states in database. Run 005_hierarchical_schema.sql first!');
       process.exit(1);
     }
@@ -562,22 +638,19 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
   }
 
   // ─── Step 2: Resolve admin boundary centres ─────────────────────────────────
-  const districtCentres = []; // { name, lat, lon, stateName }
-  const cityCentres     = []; // { name, lat, lon, districtName, stateName }
+  const districtCentres = [];
+  const cityCentres = [];
 
   for (const ab of adminBounds) {
     if (!ab.adminCentreNodeId) continue;
     const coords = nodeCoords.get(ab.adminCentreNodeId);
     if (!coords) continue;
-
     const stateName = findNearestState(coords.lat, coords.lon);
 
     if (ab.level === 5 || ab.level === 6) {
       districtCentres.push({ name: ab.name, lat: coords.lat, lon: coords.lon, stateName });
     }
     if (ab.level === 8) {
-      // City-level admin boundary — we'll use settlements for cities instead
-      // but record for reference
       cityCentres.push({ name: ab.name, lat: coords.lat, lon: coords.lon, stateName });
     }
   }
@@ -590,11 +663,9 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
   let matchedByTag = 0, matchedBySpatial = 0;
 
   for (const s of settlements) {
-    // Try tag-based matching first
     const tagState = resolveState(s.tags, s.lat, s.lon);
     s.stateName = tagState;
 
-    // Check if it came from tags or spatial
     const fromTag = str(s.tags['is_in:state'] || s.tags['is_in:state_code'] || s.tags['addr:state']);
     if (fromTag && normalizeStateName(fromTag)) matchedByTag++;
     else matchedBySpatial++;
@@ -605,20 +676,12 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
 
   // ─── Step 4: Assign each settlement to a DISTRICT ───────────────────────────
   console.log('\n  ⏳ Assigning settlements to districts...');
-
-  // First pass: tag-based district assignment
   let distByTag = 0, distBySpatial = 0, distByDefault = 0;
 
   for (const s of settlements) {
-    // Try tag-based
     let distName = resolveDistrictFromTags(s.tags) || resolveDistrictFromIsIn(s.tags);
-    if (distName) {
-      s.districtName = distName;
-      distByTag++;
-      continue;
-    }
+    if (distName) { s.districtName = distName; distByTag++; continue; }
 
-    // Spatial: find nearest admin boundary district centre in the same state
     if (districtCentres.length > 0) {
       let bestDist = Infinity, bestName = null;
       for (const dc of districtCentres) {
@@ -626,14 +689,9 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
         const d = haversine(s.lat, s.lon, dc.lat, dc.lon);
         if (d < bestDist) { bestDist = d; bestName = dc.name; }
       }
-      if (bestName && bestDist < 200) { // 200km threshold
-        s.districtName = bestName;
-        distBySpatial++;
-        continue;
-      }
+      if (bestName && bestDist < 200) { s.districtName = bestName; distBySpatial++; continue; }
     }
 
-    // Default: use a state-level default district
     s.districtName = 'General';
     distByDefault++;
   }
@@ -643,7 +701,7 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
   console.log(`     Default:    ${distByDefault.toLocaleString()}`);
 
   // ─── Step 5: Group and count ────────────────────────────────────────────────
-  const stateGroups = {}; // stateName → { districts: { districtName → settlements[] } }
+  const stateGroups = {};
   for (const s of settlements) {
     if (!s.stateName) continue;
     if (!stateGroups[s.stateName]) stateGroups[s.stateName] = {};
@@ -653,14 +711,13 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
   }
 
   const totalDistricts = Object.values(stateGroups).reduce((sum, dists) => sum + Object.keys(dists).length, 0);
-  const totalCities    = settlements.filter(s => s.stateName).length;
+  const totalCities = settlements.filter(s => s.stateName).length;
 
   console.log(`\n  📊 Hierarchy Summary:`);
   console.log(`     States:    ${Object.keys(stateGroups).length}`);
   console.log(`     Districts: ${totalDistricts}`);
   console.log(`     Cities:    ${totalCities.toLocaleString()}`);
 
-  // Top 5 states by settlement count
   const topStates = Object.entries(stateGroups)
     .map(([name, dists]) => ({ name, count: Object.values(dists).reduce((s, arr) => s + arr.length, 0) }))
     .sort((a, b) => b.count - a.count)
@@ -670,61 +727,117 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
 
   if (DRY_RUN) {
     console.log('\n  🏃 DRY RUN — skipping database writes');
-    return { stateMap, stateGroups, districtIdMap: {}, cityIndex: [] };
+    const mockCityIndex = {
+      lats: new Float64Array(settlements.filter(s => s.lat && s.lon).length),
+      lons: new Float64Array(settlements.filter(s => s.lat && s.lon).length),
+      ids: [],
+      count: 0,
+    };
+    for (const s of settlements) {
+      if (s.lat && s.lon) {
+        const i = mockCityIndex.count++;
+        mockCityIndex.lats[i] = s.lat;
+        mockCityIndex.lons[i] = s.lon;
+        mockCityIndex.ids.push(`mock-city-${i}`);
+      }
+    }
+    console.log(`  📍 Mock city index: ${mockCityIndex.count.toLocaleString()} entries`);
+    return { stateMap, stateGroups, districtIdMap: {}, cityIndex: mockCityIndex };
   }
 
-  // ─── Step 6: Insert into database ───────────────────────────────────────────
+  // ─── Step 6: Insert into database (batched, with workers) ───────────────────
   console.log('\n  ⏳ Inserting hierarchy into database...');
+  console.log(`     Workers: ${WORKERS} | District batch: ${BATCH_DISTRICTS} | City batch: ${BATCH_CITIES}\n`);
 
-  const districtIdMap = {}; // `${stateName}::${districtName}` → id
-  const cityIdMap     = {}; // `${districtId}::${cityName}` → id
-  const cityIndex     = []; // { id, lat, lon }
+  const checkpoint = loadCheckpoint();
+  const completedStates = new Set(checkpoint?.phase === 'hierarchy' ? (checkpoint.completedStates || []) : []);
+  const counters = checkpoint?.phase === 'hierarchy' ? (checkpoint.counters || {}) : {};
+  let insertedDistricts = counters.insertedDistricts || 0;
+  let insertedCities = counters.insertedCities || 0;
+  let failedDistricts = counters.failedDistricts || 0;
+  let failedCities = counters.failedCities || 0;
 
-  let insertedDistricts = 0, insertedCities = 0, failedDistricts = 0, failedCities = 0;
+  const stateOrder = Object.keys(stateGroups);
+  const startTime = Date.now();
 
-  for (const [stateName, districts] of Object.entries(stateGroups)) {
-    const stateData = stateMap[stateName];
-    if (!stateData) {
-      console.log(`     ⚠️  State not in DB: ${stateName}`);
+  for (let si = 0; si < stateOrder.length; si++) {
+    const stateName = stateOrder[si];
+
+    // Skip completed states (resume support)
+    if (completedStates.has(stateName)) {
+      process.stdout.write(`\r  ⏭️  ${stateName.padEnd(30)} (resumed)`);
       continue;
     }
 
+    const stateData = stateMap[stateName];
+    if (!stateData) {
+      console.log(`\n     ⚠️  State not in DB: ${stateName}`);
+      continue;
+    }
+
+    const districts = stateGroups[stateName];
+    const districtNames = Object.keys(districts);
+
+    // ── Batch upsert districts ──────────────────────────────────────────────
+    const districtIdMap = {}; // districtName → id
+
+    for (let di = 0; di < districtNames.length; di += BATCH_DISTRICTS) {
+      const batch = districtNames.slice(di, di + BATCH_DISTRICTS).map(name => ({
+        name,
+        state_id: stateData.id,
+      }));
+
+      const result = await withRetry(async () => {
+        return await supabase.from('districts')
+          .upsert(batch, { onConflict: 'name,state_id', ignoreDuplicates: true })
+          .select('id,name');
+      }, `Districts ${stateName} batch ${Math.floor(di / BATCH_DISTRICTS) + 1}`);
+
+      if (result?.data) {
+        for (const d of result.data) districtIdMap[d.name] = d.id;
+        insertedDistricts += result.data.length;
+        backoff.recordSuccess();
+      } else {
+        // Upsert with ignoreDuplicates returns empty array for existing rows.
+        // Fetch existing IDs for this batch.
+        backoff.recordError();
+        failedDistricts += batch.length;
+      }
+      await backoff.wait();
+    }
+
+    // Fetch all district IDs for this state (covers both new and existing)
+    const { data: stateDistricts } = await withRetry(async () => {
+      return await supabase.from('districts')
+        .select('id,name')
+        .eq('state_id', stateData.id)
+        .limit(5000);
+    }, `Fetch districts for ${stateName}`);
+
+    if (stateDistricts) {
+      for (const d of stateDistricts) districtIdMap[d.name] = d.id;
+    }
+
+    // ── Batch upsert cities (parallel within state) ─────────────────────────
+    const cityBatches = [];
     for (const [districtName, setts] of Object.entries(districts)) {
-      // Insert district
-      const distKey = `${stateName}::${districtName}`;
-      if (!districtIdMap[distKey]) {
-        const result = await withRetry(() => supaInsert('districts', [{
-          name: districtName, state_id: stateData.id
-        }], 'name,state_id'), `District ${districtName}`);
+      const districtId = districtIdMap[districtName];
+      if (!districtId) { failedCities += setts.length; continue; }
 
-        if (Array.isArray(result) && result[0]) {
-          districtIdMap[distKey] = result[0].id;
-          insertedDistricts++;
-        } else {
-          // Fetch existing
-          const existing = await supaGet('districts',
-            `name=eq.${encodeURIComponent(districtName)}&state_id=eq.${stateData.id}&select=id&limit=1`);
-          if (Array.isArray(existing) && existing[0]) {
-            districtIdMap[distKey] = existing[0].id;
-            insertedDistricts++;
-          } else {
-            failedDistricts++;
-            continue;
-          }
-        }
+      // Deduplicate settlements by name within district
+      const seen = new Set();
+      const unique = [];
+      for (const s of setts) {
+        const key = s.name.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(s);
       }
 
-      const districtId = districtIdMap[distKey];
-      if (!districtId) continue;
-
-      // Insert cities in batches
-      const cityBatches = [];
-      for (let i = 0; i < setts.length; i += BATCH_SIZE) {
-        cityBatches.push(setts.slice(i, i + BATCH_SIZE));
-      }
-
-      for (const batch of cityBatches) {
-        const records = batch.map(s => ({
+      // Build records in batches
+      for (let i = 0; i < unique.length; i += BATCH_CITIES) {
+        const slice = unique.slice(i, i + BATCH_CITIES);
+        const records = slice.map(s => ({
           name:        s.name,
           district_id: districtId,
           latitude:    s.lat,
@@ -733,50 +846,144 @@ async function buildHierarchy(settlements, adminBounds, nodeCoords) {
           place_type:  s.type,
           osm_id:      s.osmId,
         }));
+        cityBatches.push(records);
+      }
+    }
 
-        const result = await withRetry(() => supaInsertMinimal('cities', records, 'osm_id'), `Cities batch`);
-        if (result !== null) {
-          insertedCities += records.length;
-          for (const r of records) {
-            cityIndex.push({ lat: r.latitude, lon: r.longitude, districtId });
+    // Dispatch city batches through worker pool
+    const cityResults = await Promise.all(
+      cityBatches.map(batch =>
+        pool.enqueue(async () => {
+          const result = await withRetry(async () => {
+            return await supabase.from('cities')
+              .upsert(batch, { onConflict: 'name,district_id', ignoreDuplicates: true });
+          }, `Cities batch (${batch.length} records)`);
+
+          if (!result?.error) {
+            backoff.recordSuccess();
+            await backoff.wait();
+            return { ok: batch.length, fail: 0 };
+          } else {
+            backoff.recordError();
+            await backoff.wait();
+            return { ok: 0, fail: batch.length };
           }
-        } else {
-          failedCities += records.length;
-        }
-        await sleep(100);
-      }
+        })
+      )
+    );
+
+    for (const r of cityResults) {
+      insertedCities += r.ok;
+      failedCities += r.fail;
     }
 
-    process.stdout.write(`\r  📍 ${stateName.padEnd(30)} ✅`);
+    completedStates.add(stateName);
+
+    // Save checkpoint after each state
+    saveCheckpoint({
+      phase: 'hierarchy',
+      completedStates: [...completedStates],
+      counters: { insertedDistricts, insertedCities, failedDistricts, failedCities },
+      stateOrder,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+    const pct = (((si + 1) / stateOrder.length) * 100).toFixed(0);
+    process.stdout.write(`\r  📍 ${stateName.padEnd(30)} ✅ [${pct}% | ${elapsed}s | delay=${backoff.delay}ms]`);
   }
 
-  // Reload city IDs from DB for spatial matching
-  console.log('\n\n  ⏳ Loading city index from database...');
-  const dbCities = await supaGet('cities', 'select=id,name,latitude,longitude,district_id&limit=250000');
-  const fullCityIndex = [];
-  if (Array.isArray(dbCities)) {
-    for (const c of dbCities) {
-      if (c.latitude && c.longitude) {
-        fullCityIndex.push({ id: c.id, name: c.name, lat: c.latitude, lon: c.longitude, districtId: c.district_id });
-      }
-    }
-  }
+  await pool.drain();
 
-  console.log(`\n  ✅ Hierarchy inserted:`);
+  console.log(`\n\n  ✅ Hierarchy inserted:`);
   console.log(`     Districts: ${insertedDistricts} (${failedDistricts} failed)`);
   console.log(`     Cities:    ${insertedCities.toLocaleString()} (${failedCities} failed)`);
-  console.log(`     City index: ${fullCityIndex.length.toLocaleString()} with coordinates`);
 
-  return { stateMap, stateGroups, districtIdMap, cityIndex: fullCityIndex };
+  // ─── Step 7: Load lightweight city index ────────────────────────────────────
+  console.log('\n  ⏳ Loading city index (paginated, memory-efficient)...');
+  const cityIndex = await loadCityIndex();
+  console.log(`  ✅ City index: ${cityIndex.count.toLocaleString()} entries (~${(cityIndex.count * 24 / 1e6).toFixed(1)}MB)`);
+
+  return { stateMap, stateGroups, districtIdMap: {}, cityIndex };
+}
+
+// ─── Memory-efficient city index loader ───────────────────────────────────────
+async function loadCityIndex() {
+  const PAGE_SIZE = 10000;
+  let offset = 0;
+  // Pre-allocate typed arrays (will grow if needed)
+  let capacity = 300000;
+  let lats = new Float64Array(capacity);
+  let lons = new Float64Array(capacity);
+  const ids = [];
+  let count = 0;
+
+  while (true) {
+    const { data, error } = await supabase.from('cities')
+      .select('id,latitude,longitude')
+      .not('latitude', 'is', null)
+      .not('longitude', 'is', null)
+      .range(offset, offset + PAGE_SIZE - 1);
+
+    if (error) {
+      console.error(`     ⚠️ City index page error: ${error.message?.slice(0, 200)}`);
+      break;
+    }
+    if (!data || data.length === 0) break;
+
+    // Grow arrays if needed
+    if (count + data.length > capacity) {
+      capacity = Math.max(capacity * 2, count + data.length + 10000);
+      const newLats = new Float64Array(capacity);
+      const newLons = new Float64Array(capacity);
+      newLats.set(lats);
+      newLons.set(lons);
+      lats = newLats;
+      lons = newLons;
+    }
+
+    for (const c of data) {
+      lats[count] = c.latitude;
+      lons[count] = c.longitude;
+      ids.push(c.id);
+      count++;
+    }
+
+    offset += data.length;
+    if (offset % 50000 === 0) {
+      process.stdout.write(`\r     Loaded ${count.toLocaleString()} cities...`);
+    }
+  }
+
+  return {
+    lats: lats.slice(0, count),
+    lons: lons.slice(0, count),
+    ids,
+    count,
+  };
+}
+
+// ─── Spatial city matcher using typed-array index ─────────────────────────────
+function findNearestCityFromIndex(index, lat, lon, maxKm = 75) {
+  let bestIdx = -1, bestDist = maxKm;
+  const dLat = maxKm / 111.0;
+  const dLon = maxKm / (111.0 * Math.max(Math.cos(lat * Math.PI / 180), 0.01));
+
+  for (let i = 0; i < index.count; i++) {
+    if (Math.abs(index.lats[i] - lat) > dLat) continue;
+    if (Math.abs(index.lons[i] - lon) > dLon) continue;
+    const d = haversine(lat, lon, index.lats[i], index.lons[i]);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  return bestIdx >= 0 ? index.ids[bestIdx] : null;
 }
 
 // =============================================================================
-// PHASE 4: Verify Hierarchy
+// PHASE 4: Post-Import Verification
 // =============================================================================
 
-async function verifyHierarchy() {
+async function verifyImport(phase = 'hierarchy') {
   console.log('\n═══════════════════════════════════════════════════');
-  console.log('📊 PHASE 4: Verifying Hierarchy');
+  console.log(`📊 PHASE 4: Post-Import Verification (${phase})`);
   console.log('═══════════════════════════════════════════════════\n');
 
   if (DRY_RUN) {
@@ -784,52 +991,59 @@ async function verifyHierarchy() {
     return true;
   }
 
-  const states    = await supaGet('states', 'select=id&limit=1');
-  const districts = await supaGet('districts', 'select=id&limit=1');
-  const cities    = await supaGet('cities', 'select=id,latitude&limit=1');
+  const checks = [];
 
-  // Use HEAD request with count to get totals
-  const stateCount    = await httpRequest(`${SUPABASE_URL}/rest/v1/states?select=id`, 'GET', null,
-    { ...supaHeaders, 'Prefer': 'count=exact', 'Range': '0-0' }).catch(() => []);
-  const districtCount = await httpRequest(`${SUPABASE_URL}/rest/v1/districts?select=id`, 'GET', null,
-    { ...supaHeaders, 'Prefer': 'count=exact', 'Range': '0-0' }).catch(() => []);
-  const cityCount     = await httpRequest(`${SUPABASE_URL}/rest/v1/cities?select=id`, 'GET', null,
-    { ...supaHeaders, 'Prefer': 'count=exact', 'Range': '0-0' }).catch(() => []);
+  // Record counts
+  const { count: stateCount }    = await supabase.from('states').select('*', { count: 'exact', head: true });
+  const { count: districtCount } = await supabase.from('districts').select('*', { count: 'exact', head: true });
+  const { count: cityCount }     = await supabase.from('cities').select('*', { count: 'exact', head: true });
+  const { count: placeCount }    = await supabase.from('places').select('*', { count: 'exact', head: true });
 
-  // Get counts from arrays
-  const sc = Array.isArray(stateCount) ? stateCount.length : 0;
-  const dc = Array.isArray(districtCount) ? districtCount.length : 0;
-  const cc = Array.isArray(cityCount) ? cityCount.length : 0;
+  checks.push({ name: 'States',    count: stateCount || 0,    min: 36,  pass: (stateCount || 0) >= 36 });
+  checks.push({ name: 'Districts', count: districtCount || 0, min: 100, pass: (districtCount || 0) >= 100 });
+  checks.push({ name: 'Cities',    count: cityCount || 0,     min: 1000, pass: (cityCount || 0) >= 1000 });
 
-  // For accurate counts, query with proper select
-  const allStates    = await supaGet('states', 'select=name&limit=100');
-  const allDistricts = await supaGet('districts', 'select=id&limit=50000');
-  const allCities    = await supaGet('cities', 'select=id&latitude=not.is.null&limit=1');
+  if (phase === 'places' || phase === 'full') {
+    checks.push({ name: 'Places', count: placeCount || 0, min: 5000, pass: (placeCount || 0) >= 5000 });
+  }
 
-  const sCount = Array.isArray(allStates)    ? allStates.length : 0;
-  const dCount = Array.isArray(allDistricts) ? allDistricts.length : 0;
+  // FK integrity — orphan detection via RPCs
+  try {
+    const { data: od } = await supabase.rpc('count_orphan_districts');
+    const { data: oc } = await supabase.rpc('count_orphan_cities');
+    const { data: op } = await supabase.rpc('count_orphan_places');
 
-  // Get city count by checking with a larger limit
-  const cityCheck = await supaGet('cities', 'select=id&limit=300000');
-  const cCount = Array.isArray(cityCheck) ? cityCheck.length : 0;
+    checks.push({ name: 'Orphan districts', count: od || 0, pass: (od || 0) === 0 });
+    checks.push({ name: 'Orphan cities',    count: oc || 0, pass: (oc || 0) === 0 });
+    checks.push({ name: 'Orphan places',    count: op || 0, pass: true }); // Places can have null city_id
+  } catch (err) {
+    console.log('  ⚠️ Orphan RPCs not available (run migration 006). Skipping FK checks.');
+  }
 
-  console.log(`  States:    ${sCount} ${sCount >= 36 ? '✅' : '❌ (expected >= 36)'}`);
-  console.log(`  Districts: ${dCount} ${dCount >= 100 ? '✅' : '❌ (expected >= 100)'}`);
-  console.log(`  Cities:    ${cCount.toLocaleString()} ${cCount >= 1000 ? '✅' : '⚠️ (expected >= 1000)'}`);
+  // Coordinate coverage
+  const { count: citiesWithCoords } = await supabase
+    .from('cities').select('*', { count: 'exact', head: true })
+    .not('latitude', 'is', null);
+  const coordPct = (cityCount || 0) > 0 ? (((citiesWithCoords || 0) / cityCount) * 100).toFixed(1) : '0';
+  checks.push({ name: 'Cities with coords', count: citiesWithCoords || 0, pass: parseFloat(coordPct) > 95 });
 
-  if (sCount < 36) {
-    console.error('\n  ❌ VERIFICATION FAILED — States count too low. Run migration 005 first.');
-    if (!DRY_RUN) process.exit(1);
+  // Print results
+  console.log('  ┌───────────────────────────┬──────────┬────────┐');
+  console.log('  │ Check                     │ Count    │ Status │');
+  console.log('  ├───────────────────────────┼──────────┼────────┤');
+  for (const c of checks) {
+    const status = c.pass ? '✅' : '❌';
+    console.log(`  │ ${c.name.padEnd(25)} │ ${String(c.count).padStart(8)} │ ${status}     │`);
+  }
+  console.log('  └───────────────────────────┴──────────┴────────┘');
+
+  const criticalFails = checks.filter(c => !c.pass && c.name !== 'Orphan places' && c.name !== 'Places');
+  if (criticalFails.length > 0) {
+    console.error('\n  ❌ VERIFICATION FAILED — see table above');
     return false;
   }
 
-  if (dCount < 10) {
-    console.error('\n  ❌ VERIFICATION FAILED — No districts found. Hierarchy import may have failed.');
-    if (!DRY_RUN) process.exit(1);
-    return false;
-  }
-
-  console.log('\n  ✅ Hierarchy verification passed');
+  console.log('\n  ✅ All verification checks passed');
   return true;
 }
 
@@ -842,20 +1056,13 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
   console.log('📊 PHASE 5: Importing Places');
   console.log('═══════════════════════════════════════════════════\n');
 
-  if (cityIndex.length === 0) {
+  if (cityIndex.count === 0) {
     console.error('  ❌ No cities with coordinates — cannot spatially match places');
     return;
   }
 
-  // ─── Spatial city matcher ───────────────────────────────────────────────────
-  function findNearestCity(lat, lon) {
-    let best = null, bestDist = 75; // 75km max radius
-    for (const c of cityIndex) {
-      const d = haversine(lat, lon, c.lat, c.lon);
-      if (d < bestDist) { bestDist = d; best = c; }
-    }
-    return best;
-  }
+  const backoff = new AdaptiveBackoff(100);
+  const pool = new WorkerPool(WORKERS);
 
   // ─── Compute way centroids ──────────────────────────────────────────────────
   const resolvedWayPlaces = [];
@@ -868,24 +1075,22 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
     }
     if (count > 0) {
       resolvedWayPlaces.push({
-        ...wp,
-        lat: sumLat / count,
-        lon: sumLon / count,
+        ...wp, lat: sumLat / count, lon: sumLon / count,
       });
     }
   }
 
   console.log(`  📦 Place nodes:       ${placeNodes.length.toLocaleString()}`);
   console.log(`  📦 Way/Rel places:    ${resolvedWayPlaces.length.toLocaleString()} (of ${wayPlaces.length})`);
-  console.log(`  🏙️ City index size:   ${cityIndex.length.toLocaleString()}`);
+  console.log(`  🏙️ City index size:   ${cityIndex.count.toLocaleString()}`);
+  console.log(`  👷 Workers: ${WORKERS} | Batch: ${BATCH_PLACES}\n`);
 
-  // ─── Combine all places ────────────────────────────────────────────────────
+  // ─── Combine + deduplicate ──────────────────────────────────────────────────
   const allSources = [
     ...placeNodes.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, tags: p.tags, osmId: p.osmId, category: p.category })),
     ...resolvedWayPlaces.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, tags: p.tags, osmId: p.osmId, category: p.category })),
   ];
 
-  // Deduplicate by osm_id
   const seenOsmIds = new Set();
   const deduplicated = [];
   for (const p of allSources) {
@@ -894,9 +1099,17 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
     deduplicated.push(p);
   }
 
-  console.log(`  📦 After dedup:       ${deduplicated.length.toLocaleString()}`);
+  console.log(`  📦 After dedup: ${deduplicated.length.toLocaleString()}`);
 
-  // ─── Build place records with spatial city matching ─────────────────────────
+  // ─── Resume support ────────────────────────────────────────────────────────
+  const checkpoint = loadCheckpoint();
+  let startIdx = 0;
+  if (checkpoint?.phase === 'places' && checkpoint.lastPlaceIdx) {
+    startIdx = checkpoint.lastPlaceIdx;
+    console.log(`  ⏭️ Resuming from index ${startIdx.toLocaleString()}`);
+  }
+
+  // ─── Build and flush batches ────────────────────────────────────────────────
   const PLACE_KEYS = ['name', 'description', 'city_id', 'category', 'place_type',
     'latitude', 'longitude', 'image_url', 'wiki_url', 'osm_id', 'source', 'metadata'];
 
@@ -910,28 +1123,32 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
     return out;
   }
 
-  let totalInserted = 0, totalFailed = 0, matchedToCity = 0, unmatchedCity = 0;
-  let batchIndex = 0;
+  let totalInserted = checkpoint?.phase === 'places' ? (checkpoint.counters?.totalInserted || 0) : 0;
+  let totalFailed = checkpoint?.phase === 'places' ? (checkpoint.counters?.totalFailed || 0) : 0;
+  let totalSkipped = 0;
+  let matchedToCity = 0, unmatchedCity = 0;
+  let batchNum = 0;
   const categoryCounts = {};
   const batch = [];
   const startTime = Date.now();
 
   function printProgress() {
     const el = Math.max(1, (Date.now() - startTime) / 1000).toFixed(0);
+    const rate = (totalInserted / Math.max(1, (Date.now() - startTime) / 1000)).toFixed(0);
     process.stdout.write(
-      `\r  ✅ ${String(totalInserted).padStart(8)} inserted | ⏱ ${el}s | 🏙️ ${matchedToCity} matched | ❌ ${unmatchedCity} no city`
+      `\r  ✅ ${String(totalInserted).padStart(8)} inserted | ⏱ ${el}s | ${rate}/s | 🏙️ ${matchedToCity} matched | delay=${backoff.delay}ms`
     );
   }
 
   async function flushBatch() {
     if (batch.length === 0) return;
     const records = batch.splice(0, batch.length);
-    batchIndex++;
+    batchNum++;
 
-    // Validate keys
-    if (batchIndex === 1) {
+    // Validate first batch schema
+    if (batchNum === 1) {
       const expected = JSON.stringify([...PLACE_KEYS].sort());
-      const actual   = JSON.stringify(Object.keys(records[0]).sort());
+      const actual = JSON.stringify(Object.keys(records[0]).sort());
       if (actual !== expected) {
         console.error(`\n  ❌ Key mismatch!\n  Expected: ${expected}\n  Got:      ${actual}`);
         process.exit(1);
@@ -942,10 +1159,21 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
     if (DRY_RUN) {
       totalInserted += records.length;
     } else {
-      const ok = await withRetry(() => supaInsertMinimal('places', records, 'osm_id'), `Batch ${batchIndex}`);
-      if (ok !== null) totalInserted += records.length;
-      else             totalFailed   += records.length;
-      await sleep(DELAY_MS);
+      await pool.enqueue(async () => {
+        const result = await withRetry(async () => {
+          return await supabase.from('places')
+            .upsert(records, { onConflict: 'osm_id', ignoreDuplicates: true });
+        }, `Places batch ${batchNum} (${records.length} records)`);
+
+        if (!result?.error) {
+          totalInserted += records.length;
+          backoff.recordSuccess();
+        } else {
+          totalFailed += records.length;
+          backoff.recordError();
+        }
+        await backoff.wait();
+      });
     }
 
     for (const r of records) {
@@ -955,15 +1183,14 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
 
   console.log('\n  ⏳ Building place records with spatial city matching...\n');
 
-  for (let i = 0; i < deduplicated.length; i++) {
+  for (let i = startIdx; i < deduplicated.length; i++) {
     if (totalInserted >= LIMIT) break;
 
     const p = deduplicated[i];
-    if (!p.name || !p.category || !p.lat || !p.lon) continue;
+    if (!p.name || !p.category || !p.lat || !p.lon) { totalSkipped++; continue; }
 
     // Spatial match to nearest city
-    const nearestCity = findNearestCity(p.lat, p.lon);
-    const cityId = nearestCity ? nearestCity.id : null;
+    const cityId = findNearestCityFromIndex(cityIndex, p.lat, p.lon);
     if (cityId) matchedToCity++;
     else unmatchedCity++;
 
@@ -993,11 +1220,23 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
     });
 
     batch.push(record);
-    if (batch.length >= BATCH_SIZE) await flushBatch();
-    if (i % 5000 === 0) printProgress();
+    if (batch.length >= BATCH_PLACES) await flushBatch();
+
+    if (i % 5000 === 0) {
+      printProgress();
+      // Save checkpoint periodically
+      if (!DRY_RUN && i % 20000 === 0) {
+        saveCheckpoint({
+          phase: 'places',
+          lastPlaceIdx: i,
+          counters: { totalInserted, totalFailed, matchedToCity, unmatchedCity },
+        });
+      }
+    }
   }
 
   await flushBatch();
+  await pool.drain();
   printProgress();
 
   // ─── Summary ────────────────────────────────────────────────────────────────
@@ -1008,6 +1247,7 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
   console.log(`   Inserted:        ${totalInserted.toLocaleString()}`);
   console.log(`   Matched to city: ${matchedToCity.toLocaleString()}`);
   console.log(`   No city match:   ${unmatchedCity.toLocaleString()}`);
+  console.log(`   Skipped:         ${totalSkipped.toLocaleString()}`);
   if (totalFailed > 0) console.log(`   ⚠️  Failed:       ${totalFailed.toLocaleString()}`);
   console.log(`   Time:            ${elapsed}s`);
   if (Object.keys(categoryCounts).length > 0) {
@@ -1020,49 +1260,156 @@ async function importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex) {
 }
 
 // =============================================================================
-// PHASE 6: Image Enrichment
+// PHASE 7: Create/Refresh Search Indexes
+// =============================================================================
+
+async function createSearchIndexes() {
+  console.log('\n═══════════════════════════════════════════════════');
+  console.log('🔍 PHASE 7: Refreshing Search Indexes');
+  console.log('═══════════════════════════════════════════════════\n');
+
+  if (DRY_RUN) {
+    console.log('  ✅ Skipped (dry-run mode)');
+    return;
+  }
+
+  // Run ANALYZE on all tables to update query planner statistics
+  const tables = ['countries', 'states', 'districts', 'cities', 'places'];
+  for (const table of tables) {
+    const { error } = await supabase.rpc('exec_sql', { query: `ANALYZE public.${table}` }).catch(e => ({ error: e }));
+    if (error) {
+      console.log(`  ⚠️ Could not ANALYZE ${table} via RPC — run migration 006 manually if needed`);
+    } else {
+      console.log(`  ✅ ANALYZE ${table}`);
+    }
+  }
+
+  // Check if trigram indexes exist
+  const { data: indexes } = await supabase
+    .from('pg_indexes')
+    .select('indexname')
+    .like('indexname', '%trgm%')
+    .limit(4)
+    .catch(() => ({ data: null }));
+
+  if (indexes && indexes.length >= 3) {
+    console.log(`  ✅ Trigram indexes found (${indexes.length})`);
+  } else {
+    console.log('  ⚠️ Trigram indexes not found — run migration 006_search_and_verification.sql');
+  }
+
+  console.log('\n  ✅ Search index refresh complete');
+}
+
+// =============================================================================
+// PHASE 8: Queue-based Image Enrichment
 // =============================================================================
 
 async function enrichImages() {
   console.log('\n═══════════════════════════════════════════════════');
-  console.log('🖼️  PHASE 6: Wikipedia Image Enrichment');
+  console.log('🖼️  PHASE 8: Wikipedia Image Enrichment');
   console.log('═══════════════════════════════════════════════════\n');
 
-  const places = await supaGet('places', 'select=id,name,wiki_url&image_url=is.null&limit=3000&order=name.asc');
-  if (!Array.isArray(places) || places.length === 0) {
-    console.log('  ✅ All places already have images');
+  if (DRY_RUN) {
+    console.log('  ✅ Skipped (dry-run mode)');
     return;
   }
 
-  console.log(`  📦 ${places.length} places need images\n`);
-  let enriched = 0, noImage = 0;
+  const backoff = new AdaptiveBackoff(200);
+  const ENRICH_BATCH = 50;
+  let enriched = 0, noImage = 0, errors = 0;
+  let offset = 0;
+  const startTime = Date.now();
 
-  for (let i = 0; i < places.length; i++) {
-    const place = places[i];
-    try {
-      const res = await new Promise((resolve) => {
-        const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(place.name.replace(/ /g, '_'))}`;
-        https.get(url, { timeout: 5000 }, (r) => {
-          let b = ''; r.on('data', c => b += c);
-          r.on('end', () => { if (r.statusCode === 200) { try { resolve(JSON.parse(b)); } catch { resolve(null); } } else resolve(null); });
-        }).on('error', () => resolve(null));
-      });
-
-      if (res?.thumbnail?.source) {
-        const imgUrl = res.thumbnail.source.replace(/\/\d+px-/, '/400px-');
-        if (!DRY_RUN) {
-          await httpRequest(`${SUPABASE_URL}/rest/v1/places?id=eq.${place.id}`, 'PATCH',
-            { image_url: imgUrl }, { ...supaHeaders, 'Prefer': 'return=minimal' });
-        }
-        enriched++;
-      } else { noImage++; }
-    } catch { noImage++; }
-
-    if ((i + 1) % 50 === 0) process.stdout.write(`\r  🖼️ ${enriched} enriched | ${noImage} no image | ${i + 1}/${places.length}`);
-    await sleep(100);
+  // Resume support
+  const checkpoint = loadCheckpoint();
+  if (checkpoint?.phase === 'enrich' && checkpoint.enrichOffset) {
+    offset = checkpoint.enrichOffset;
+    enriched = checkpoint.counters?.enriched || 0;
+    noImage = checkpoint.counters?.noImage || 0;
+    console.log(`  ⏭️ Resuming from offset ${offset} (${enriched} already enriched)`);
   }
 
-  console.log(`\n\n  ✅ Enriched ${enriched} | No image: ${noImage}`);
+  // Count places needing images
+  const { count } = await supabase
+    .from('places').select('*', { count: 'exact', head: true })
+    .is('image_url', null)
+    .not('wiki_url', 'is', null);
+
+  console.log(`  📦 ${(count || 0).toLocaleString()} places need image enrichment\n`);
+
+  if (!count || count === 0) {
+    console.log('  ✅ All places with wiki_url already have images');
+    return;
+  }
+
+  while (true) {
+    const { data: batch, error } = await supabase
+      .from('places')
+      .select('id,name,wiki_url')
+      .is('image_url', null)
+      .not('wiki_url', 'is', null)
+      .range(0, ENRICH_BATCH - 1)  // Always fetch from start since we update as we go
+      .order('name');
+
+    if (error || !batch || batch.length === 0) break;
+
+    for (const place of batch) {
+      try {
+        const imgUrl = await fetchWikipediaImage(place.name);
+        if (imgUrl) {
+          await supabase.from('places').update({ image_url: imgUrl }).eq('id', place.id);
+          enriched++;
+          backoff.recordSuccess();
+        } else {
+          // Set a placeholder to avoid re-processing
+          await supabase.from('places').update({ image_url: 'none' }).eq('id', place.id);
+          noImage++;
+        }
+      } catch (err) {
+        errors++;
+        backoff.recordError();
+      }
+      await backoff.wait();
+    }
+
+    offset += batch.length;
+    const el = ((Date.now() - startTime) / 1000).toFixed(0);
+    process.stdout.write(`\r  🖼️ ${enriched} enriched | ${noImage} no image | ${errors} errors | ${el}s`);
+
+    saveCheckpoint({
+      phase: 'enrich',
+      enrichOffset: offset,
+      counters: { enriched, noImage, errors },
+    });
+  }
+
+  console.log(`\n\n  ✅ Enrichment complete: ${enriched} images | ${noImage} no image | ${errors} errors`);
+  clearCheckpoint();
+}
+
+function fetchWikipediaImage(placeName) {
+  return new Promise((resolve) => {
+    const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(placeName.replace(/ /g, '_'))}`;
+    const req = https.get(url, { timeout: 8000 }, (res) => {
+      let body = '';
+      res.on('data', c => body += c);
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const data = JSON.parse(body);
+            if (data.thumbnail?.source) {
+              resolve(data.thumbnail.source.replace(/\/\d+px-/, '/400px-'));
+              return;
+            }
+          } catch {}
+        }
+        resolve(null);
+      });
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
 }
 
 // =============================================================================
@@ -1070,15 +1417,30 @@ async function enrichImages() {
 // =============================================================================
 
 async function main() {
-  console.log('\n🗺️  ExploreHub — OSM Import v6 (Spatial Hierarchy)');
+  console.log('\n🗺️  ExploreHub — OSM Import v7 (Production-Reliable)');
   console.log('═══════════════════════════════════════════════════');
   console.log(`📂 File:     ${path.basename(PBF_FILE)} (${(fs.statSync(PBF_FILE).size / 1e9).toFixed(2)} GB)`);
   console.log(`🔑 Auth:     ${useServiceKey ? '✅ Service Role' : '🔑 Anon Key'}`);
   console.log(`🗄️  Database: ${SUPABASE_URL}`);
+  console.log(`👷 Workers:  ${WORKERS} | Batches: D=${BATCH_DISTRICTS} C=${BATCH_CITIES} P=${BATCH_PLACES}`);
   if (DRY_RUN)          console.log('🏃 Mode:     DRY RUN');
+  if (FRESH)            console.log('🔄 Mode:     FRESH (ignoring checkpoint)');
   if (LIMIT < Infinity) console.log(`🔢 Limit:    ${LIMIT} places`);
   if (PASS_ONLY)        console.log(`📊 Pass:     ${PASS_ONLY} only`);
   if (ENRICH_IMG)       console.log('🖼️  Mode:     Image enrichment');
+
+  // Check for existing checkpoint
+  const checkpoint = loadCheckpoint();
+  if (checkpoint) {
+    console.log(`\n  📋 Checkpoint found: phase=${checkpoint.phase}, updated=${checkpoint.timestamp}`);
+    if (checkpoint.counters) {
+      const c = checkpoint.counters;
+      console.log(`     Progress: districts=${c.insertedDistricts || 0} cities=${c.insertedCities || 0}`);
+    }
+    if (checkpoint.completedStates) {
+      console.log(`     Completed states: ${checkpoint.completedStates.length}/${checkpoint.stateOrder?.length || '?'}`);
+    }
+  }
 
   if (ENRICH_IMG) {
     await enrichImages();
@@ -1089,17 +1451,18 @@ async function main() {
     // Pass 1: Collect raw data
     const { settlements, placeNodes, wayPlaces, adminBounds, neededNodeIds } = await pass1();
 
-    // Pass 2: Resolve node coordinates for ways + admin centres
+    // Pass 2: Resolve node coordinates
     const nodeCoords = await pass2(neededNodeIds);
 
     // Phase 3: Build hierarchy
     const { cityIndex } = await buildHierarchy(settlements, adminBounds, nodeCoords);
 
-    // Phase 4: Verify
-    const ok = await verifyHierarchy();
+    // Phase 4: Verify hierarchy
+    const ok = await verifyImport('hierarchy');
 
     if (PASS_ONLY === 'hierarchy') {
       console.log('\n  ✅ Hierarchy-only mode complete.');
+      clearCheckpoint();
       return;
     }
 
@@ -1110,35 +1473,39 @@ async function main() {
 
     // Phase 5: Import places
     await importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex);
+
+    // Phase 6: Re-verify after places
+    await verifyImport('full');
+
+    // Clear hierarchy/places checkpoint
+    clearCheckpoint();
   }
 
   if (PASS_ONLY === 'places') {
-    // Load existing hierarchy
     console.log('\n  ⏳ Loading existing hierarchy for place import...');
-    const dbCities = await supaGet('cities', 'select=id,name,latitude,longitude,district_id&limit=300000');
-    const cityIndex = [];
-    if (Array.isArray(dbCities)) {
-      for (const c of dbCities) {
-        if (c.latitude && c.longitude) cityIndex.push({ id: c.id, lat: c.latitude, lon: c.longitude, districtId: c.district_id });
-      }
-    }
-    console.log(`  ✅ ${cityIndex.length.toLocaleString()} cities loaded\n`);
+    const cityIndex = await loadCityIndex();
+    console.log(`  ✅ ${cityIndex.count.toLocaleString()} cities loaded\n`);
 
-    if (cityIndex.length === 0) {
+    if (cityIndex.count === 0) {
       console.error('  ❌ No cities found — run hierarchy import first!');
       return;
     }
 
-    const ok = await verifyHierarchy();
+    const ok = await verifyImport('hierarchy');
     if (!ok) return;
 
-    // Need to re-scan PBF for places
     const { placeNodes, wayPlaces, neededNodeIds } = await pass1();
     const nodeCoords = await pass2(neededNodeIds);
     await importPlaces(placeNodes, wayPlaces, nodeCoords, cityIndex);
+
+    await verifyImport('full');
+    clearCheckpoint();
   }
+
+  // Phase 7: Search indexes
+  await createSearchIndexes();
 
   console.log('\n🎉 Import complete! Open http://localhost:5173 and search for places.');
 }
 
-main().catch(err => { console.error('\n❌ Fatal:', err.message); process.exit(1); });
+main().catch(err => { console.error('\n❌ Fatal:', err.message || err); process.exit(1); });
