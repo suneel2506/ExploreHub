@@ -1276,7 +1276,18 @@ async function createSearchIndexes() {
   // Run ANALYZE on all tables to update query planner statistics
   const tables = ['countries', 'states', 'districts', 'cities', 'places'];
   for (const table of tables) {
-    const { error } = await supabase.rpc('exec_sql', { query: `ANALYZE public.${table}` }).catch(e => ({ error: e }));
+    let error = null;
+
+    try {
+        const result = await supabase.rpc('exec_sql', {
+            query: `ANALYZE public.${table}`
+        });
+    
+        error = result.error;
+    }
+    catch (err) {
+        error = err;
+    }
     if (error) {
       console.log(`  ⚠️ Could not ANALYZE ${table} via RPC — run migration 006 manually if needed`);
     } else {
@@ -1285,12 +1296,20 @@ async function createSearchIndexes() {
   }
 
   // Check if trigram indexes exist
-  const { data: indexes } = await supabase
-    .from('pg_indexes')
-    .select('indexname')
-    .like('indexname', '%trgm%')
-    .limit(4)
-    .catch(() => ({ data: null }));
+  let indexes = null;
+
+  try {
+      const result = await supabase
+          .from('pg_indexes')
+          .select('indexname')
+          .like('indexname', '%trgm%')
+          .limit(4);
+  
+      indexes = result.data;
+  }
+  catch (err) {
+      indexes = null;
+  }
 
   if (indexes && indexes.length >= 3) {
     console.log(`  ✅ Trigram indexes found (${indexes.length})`);
@@ -1503,8 +1522,14 @@ async function main() {
   }
 
   // Phase 7: Search indexes
-  await createSearchIndexes();
-
+  // await createSearchIndexes();
+  // Phase 7: Search indexes
+  try {
+      await createSearchIndexes();
+  } catch (err) {
+      console.log("\n⚠️ Search index creation skipped.");
+      console.log(err.message);
+  }
   console.log('\n🎉 Import complete! Open http://localhost:5173 and search for places.');
 }
 
