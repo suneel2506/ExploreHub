@@ -84,6 +84,7 @@ export async function uploadPhoto(file, userId, onProgress) {
       });
     } catch {
       fileToUpload = file; // use original if compression fails
+      console.timeEnd("Compress");
     }
   }
 
