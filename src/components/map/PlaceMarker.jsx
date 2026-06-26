@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import { CATEGORY_COLORS } from '@/lib/constants';

@@ -8,11 +8,6 @@ import { useAuthStore } from '@/store/authStore';
 import { useUserDataStore } from '@/store/userDataStore';
 import { MapPin, Navigation, CheckCircle, Heart, BookOpen, Star } from 'lucide-react';
 
-useEffect(() => {
-  setRating(visitData?.rating ?? 0);
-  setNotes(visitData?.notes ?? '');
-}, [place, visitData]);
-
 export default function PlaceDetailModal({ place, isOpen, onClose }) {
   const { user } = useAuthStore();
   const { visitedPlaces, wishlist, memories, markVisited, unmarkVisited, addToWishlist, removeFromWishlist } =
@@ -31,6 +26,12 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
   const [rating, setRating] = useState(visitData?.rating ?? 0);
   const [notes, setNotes] = useState(visitData?.notes ?? '');
   const [busy, setBusy] = useState(false);
+  
+useEffect(() => {
+  setRating(visitData?.rating ?? 0);
+  setNotes(visitData?.notes ?? '');
+}, [place, visitData]);
+
 
   if (!place) return null;
 

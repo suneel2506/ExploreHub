@@ -1,0 +1,310 @@
+# ExploreHub Upgrade Prompt (Production Safe)
+
+You are a senior software architect and full-stack engineer.
+
+This is a production-ready React + Vite + Supabase application called **ExploreHub**.
+
+The application is currently stable and fully functional.
+
+Current status:
+
+* 272,367 cities imported
+* 124,482 places imported
+* Explore page works
+* Search works
+* Pagination works
+* Map works
+* Marker clustering works
+* Place detail modal works
+* Authentication works
+* Wishlist works
+* Memories work
+* Visited places work
+
+## MOST IMPORTANT RULE
+
+Treat the current project as a production application.
+
+DO NOT rewrite working code.
+
+DO NOT refactor working code.
+
+DO NOT redesign the UI.
+
+DO NOT rename files.
+
+DO NOT change component structure.
+
+DO NOT remove existing functionality.
+
+DO NOT change APIs unless absolutely required.
+
+DO NOT modify any logic that is already working.
+
+Everything currently working must continue working exactly as before.
+
+Only ADD new features.
+
+If a change is required, make the smallest possible modification.
+
+Never replace a working implementation with a different one simply because it is "cleaner."
+
+Every modification must be backward compatible.
+
+---
+
+## Objective
+
+Upgrade ExploreHub into a richer travel platform by expanding place data while preserving the current application.
+
+---
+
+## Feature 1 — Multiple Data Sources
+
+Instead of relying only on OpenStreetMap, integrate multiple sources.
+
+Priority order:
+
+1. OpenStreetMap
+2. Wikidata
+3. Wikipedia
+4. Wikimedia Commons
+5. User uploaded images
+
+---
+
+## Feature 2 — Real Images
+
+The current application shows placeholder category images.
+
+Replace them with real place photographs.
+
+Image priority:
+
+1. Existing image stored in Supabase
+2. Wikimedia Commons image
+3. Wikipedia image
+4. User uploaded image
+5. Placeholder image only if nothing exists
+
+Never overwrite existing valid images.
+
+Cache downloaded image URLs inside Supabase.
+
+Never request the same image twice.
+
+---
+
+## Feature 3 — Automatic Data Enrichment
+
+For every imported place:
+
+Automatically enrich:
+
+* description
+* image
+* wikipedia url
+* wikidata id
+* heritage information
+* tourism information
+* aliases
+* official names
+
+Store everything in Supabase.
+
+Never fetch the same metadata twice.
+
+---
+
+## Feature 4 — Incremental Import
+
+Do NOT recreate the database.
+
+Instead:
+
+Detect places that have missing data.
+
+Only enrich those records.
+
+Already imported places must remain untouched.
+
+---
+
+## Feature 5 — Better Search
+
+When a user searches:
+
+"Kanchipuram"
+
+The system should search:
+
+* place names
+* city
+* district
+* state
+* aliases
+* wikipedia titles
+* wikidata labels
+
+If only a few places are found:
+
+Automatically discover additional tourist places for that location using OpenStreetMap and Wikidata.
+
+Insert only new places.
+
+Never insert duplicates.
+
+---
+
+## Feature 6 — Duplicate Detection
+
+Before inserting any place:
+
+Check:
+
+* OSM ID
+* Wikidata ID
+* Coordinates
+* Name similarity
+
+Prevent duplicates.
+
+---
+
+## Feature 7 — Performance
+
+The project must remain fast.
+
+Requirements:
+
+* Pagination must continue working.
+* Marker clustering must continue working.
+* Search must remain fast.
+* No full-table scans.
+* Use indexes.
+* Use batched inserts.
+* Use caching.
+* Use lazy loading.
+* Keep memory usage low.
+
+---
+
+## Feature 8 — Image Caching
+
+Never fetch images every time the app loads.
+
+When an image is downloaded:
+
+Store its URL in Supabase.
+
+Next request must use the cached URL.
+
+---
+
+## Feature 9 — Safe Database Changes
+
+Do not remove existing columns.
+
+Only add nullable columns if required.
+
+Create migrations.
+
+Do not destroy existing data.
+
+---
+
+## Feature 10 — Code Quality
+
+Every change must include:
+
+* comments
+* error handling
+* retries
+* logging
+* loading states
+
+---
+
+## Existing UI
+
+Preserve:
+
+* Explore Page
+* Map
+* Place Detail Modal
+* Wishlist
+* Memories
+* Profile
+* Visited
+* Authentication
+
+Pixel-perfect.
+
+---
+
+## Existing Database
+
+Preserve every table.
+
+Preserve every relationship.
+
+Preserve every foreign key.
+
+Preserve every index.
+
+---
+
+## Existing React Components
+
+Do not replace components.
+
+Only extend them.
+
+---
+
+## Existing Zustand Stores
+
+Do not rewrite stores.
+
+Only extend them.
+
+---
+
+## Existing Search
+
+Do not replace.
+
+Improve it.
+
+---
+
+## Existing Importer
+
+Do not rewrite.
+
+Extend it.
+
+---
+
+## Existing APIs
+
+Remain compatible.
+
+---
+
+## Output Requirements
+
+For every change:
+
+1. Explain why.
+2. Explain which files change.
+3. Show complete modified files only.
+4. Do not omit code.
+5. Preserve formatting.
+6. Preserve functionality.
+7. Ensure the project compiles after every step.
+8. Never introduce breaking changes.
+
+The project must remain functional after every modification.
+
+No regressions are acceptable.
