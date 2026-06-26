@@ -32,7 +32,13 @@ export default function ExplorePage() {
   const [selectedPlace, setSelectedPlace] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
 
-  const debouncedSearch = useDebounce(filters.search, 400);
+  const debouncedSearch =
+    useDebounce(
+        filters.search.length >= 3
+            ? filters.search
+            : "",
+        800
+    );
 
   // Fetch from DB whenever category or debounced search changes
   useEffect(() => {
@@ -86,7 +92,18 @@ export default function ExplorePage() {
         }
       />
 
-      <PlaceFilters filters={filters} onChange={setFilters} />
+      <PlaceFilters  filters={filters} onChange={setFilters} />
+      {loading && places.length > 0 && (
+    <div
+        style={{
+            display:"flex",
+            justifyContent:"center",
+            margin:"20px"
+        }}
+    >
+        <Loader size={22}/>
+    </div>
+)}
 
       <div style={{ flex: 1, padding: '24px 32px', overflowY: 'auto' }}>
         {loading && places.length === 0 ? (

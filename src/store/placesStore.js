@@ -25,19 +25,36 @@ export const usePlacesStore = create((set, get) => ({
     const currentPage = reset ? 0 : get().page;
     if (!reset && !get().hasMore) return;
 
-    set({ loading: true, error: null, ...(reset ? { places: [], page: 0, hasMore: true, searchContext: null } : {}) });
+    set({ loading: true, error: null, ...(reset ? {  page: 0, hasMore: true, searchContext: null } : {}) });
 
     const from = currentPage * PAGE_SIZE;
     const to   = from + PAGE_SIZE - 1;
 
     let query = supabase
-      .from('v_places_full')
-      .select(
-        'id,name,description,category,place_type,latitude,longitude,image_url,wiki_url,osm_id,source,' +
-        'city_id,city_name,district_id,district_name,state_id,state_name,state_code,' +
-        'country_id,country_name,country_code,country_flag',
-        { count: 'exact' }
-      )
+    .from('v_places_full')
+    .select(`
+        id,
+        name,
+        description,
+        category,
+        place_type,
+        latitude,
+        longitude,
+        image_url,
+        wiki_url,
+  
+        city_id,
+        city_name,
+  
+        district_id,
+        district_name,
+  
+        state_id,
+        state_name,
+  
+        country_name,
+        country_flag
+    `, { count: "exact" })
       .range(from, to);
 
     // Category filter
@@ -49,23 +66,59 @@ export const usePlacesStore = create((set, get) => ({
     if (filters.search && filters.search.trim()) {
       const term = filters.search.trim();
 
-      // Check if search term matches a city, district, or state
-      // Use OR across the denormalized view columns
-      query = query.or(
-        [
-          `name.ilike.%${term}%`,
-          `city_name.ilike.%${term}%`,
-          `district_name.ilike.%${term}%`,
-          `state_name.ilike.%${term}%`,
-        ].join(',')
-      );
+// 1. City
+const { data: city } = await supabase
+    .from("cities")
+    .select("id")
+    .ilike("name", term)
+    .limit(1);
+
+if (city && city.length) {
+
+    query = query.eq("city_id", city[0].id);
+
+} else {
+
+    // 2. District
+    const { data: district } = await supabase
+        .from("districts")
+        .select("id")
+        .ilike("name", term)
+        .limit(1);
+
+    if (district && district.length) {
+
+        query = query.eq("district_id", district[0].id);
+
+    } else {
+
+        // 3. State
+        const { data: state } = await supabase
+            .from("states")
+            .select("id")
+            .ilike("name", term)
+            .limit(1);
+
+        if (state && state.length) {
+
+            query = query.eq("state_id", state[0].id);
+
+        } else {
+
+            // 4. Place name
+            query = query.ilike("name", `%${term}%`);
+
+        }
     }
+}
+    }
+     
 
     // Sort
     if (filters.sort === 'name_desc') {
       query = query.order('name', { ascending: false });
     } else if (filters.sort === 'recent') {
-      query = query.order('created_at', { ascending: false });
+      query = query.order('name', { ascending: false });
     } else {
       query = query.order('name', { ascending: true });
     }
@@ -79,20 +132,28 @@ export const usePlacesStore = create((set, get) => ({
 
     // Detect search context for UI display
     let searchContext = null;
-    if (filters.search && filters.search.trim() && data && data.length > 0) {
-      const term = filters.search.trim().toLowerCase();
 
-      // Check if most results share a common city/district/state
-      const cityMatch    = data.find(p => p.city_name?.toLowerCase() === term);
-      const districtMatch = data.find(p => p.district_name?.toLowerCase() === term);
-      const stateMatch   = data.find(p => p.state_name?.toLowerCase() === term);
-
-      if (cityMatch) {
-        searchContext = { type: 'city', name: cityMatch.city_name, id: cityMatch.city_id };
-      } else if (districtMatch) {
-        searchContext = { type: 'district', name: districtMatch.district_name, id: districtMatch.district_id };
-      } else if (stateMatch) {
-        searchContext = { type: 'state', name: stateMatch.state_name, id: stateMatch.state_id };
+    if (data && data.length > 0) {
+      const first = data[0];
+    
+      if (first.city_name) {
+        searchContext = {
+          type: "city",
+          name: first.city_name,
+          id: first.city_id
+        };
+      } else if (first.district_name) {
+        searchContext = {
+          type: "district",
+          name: first.district_name,
+          id: first.district_id
+        };
+      } else if (first.state_name) {
+        searchContext = {
+          type: "state",
+          name: first.state_name,
+          id: first.state_id
+        };
       }
     }
 
@@ -159,46 +220,85 @@ export const usePlacesStore = create((set, get) => ({
     const { data: cities } = await supabase
       .from('cities')
       .select('id,name,latitude,longitude')
-      .ilike('name', `%${term}%`)
+      .ilike("name", term)
       .not('latitude', 'is', null)
-      .limit(1);
+      .single();
 
-    if (cities && cities.length > 0 && cities[0].latitude) {
-      return { lat: cities[0].latitude, lon: cities[0].longitude, name: cities[0].name, type: 'city', zoom: 12 };
-    }
+if (cities && cities.latitude) {
+    return {
+        lat: cities.latitude,
+        lon: cities.longitude,
+        name: cities.name,
+        type: "city",
+        zoom: 12
+    };
+}
 
     // Try districts
     const { data: districtPlaces } = await supabase
       .from('v_places_full')
       .select('latitude,longitude,district_name')
-      .ilike('district_name', `%${term}%`)
-      .limit(1);
+      .ilike('district_name', term)
+      .single();
 
-    if (districtPlaces && districtPlaces.length > 0) {
-      return { lat: districtPlaces[0].latitude, lon: districtPlaces[0].longitude, name: districtPlaces[0].district_name, type: 'district', zoom: 10 };
+      if (districtPlaces) {
+        return {
+            lat: districtPlaces.latitude,
+            lon: districtPlaces.longitude,
+            name: districtPlaces.district_name,
+            type: "district",
+            zoom: 10
+        };
     }
 
     // Try states
     const { data: statePlaces } = await supabase
       .from('v_places_full')
       .select('latitude,longitude,state_name')
-      .ilike('state_name', `%${term}%`)
-      .limit(1);
+      .ilike('state_name', term)
+      .single();
 
-    if (statePlaces && statePlaces.length > 0) {
-      return { lat: statePlaces[0].latitude, lon: statePlaces[0].longitude, name: statePlaces[0].state_name, type: 'state', zoom: 7 };
-    }
+      if(statePlaces){
+
+        return{
+        
+        lat:statePlaces.latitude,
+        
+        lon:statePlaces.longitude,
+        
+        name:statePlaces.state_name,
+        
+        type:"state",
+        
+        zoom:7
+        
+        };
+        
+        }
 
     // Try place name directly
     const { data: directPlaces } = await supabase
       .from('v_places_full')
       .select('latitude,longitude,name')
-      .ilike('name', `%${term}%`)
-      .limit(1);
+      .ilike('name', term)
+      .single();
+      if(directPlaces){
 
-    if (directPlaces && directPlaces.length > 0) {
-      return { lat: directPlaces[0].latitude, lon: directPlaces[0].longitude, name: directPlaces[0].name, type: 'place', zoom: 14 };
-    }
+        return{
+        
+        lat:directPlaces.latitude,
+        
+        lon:directPlaces.longitude,
+        
+        name:directPlaces.name,
+        
+        type:"place",
+        
+        zoom:14
+        
+        };
+        
+        }
 
     return null;
   },

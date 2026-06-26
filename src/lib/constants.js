@@ -87,4 +87,4 @@ export const SORT_OPTIONS = [
   { id: 'recent',     label: 'Recently Added' },
 ];
 
-export const PAGE_SIZE = 48;
+export const PAGE_SIZE = 50;

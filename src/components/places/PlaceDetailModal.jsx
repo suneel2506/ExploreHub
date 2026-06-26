@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Modal from '@/components/ui/Modal';
 import Button from '@/components/ui/Button';
 import Badge from '@/components/ui/Badge';
@@ -7,6 +7,11 @@ import { useToast } from '@/components/ui/Toast';
 import { useAuthStore } from '@/store/authStore';
 import { useUserDataStore } from '@/store/userDataStore';
 import { MapPin, Navigation, CheckCircle, Heart, BookOpen, Star } from 'lucide-react';
+
+useEffect(() => {
+  setRating(visitData?.rating ?? 0);
+  setNotes(visitData?.notes ?? '');
+}, [place, visitData]);
 
 export default function PlaceDetailModal({ place, isOpen, onClose }) {
   const { user } = useAuthStore();
@@ -17,7 +22,11 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
   const isVisited = visitedPlaces.some((v) => v.place_id === place?.id);
   const isWishlisted = wishlist.some((w) => w.place_id === place?.id);
   const visitData = visitedPlaces.find((v) => v.place_id === place?.id);
-  const placeMemories = memories.filter((m) => m.place_id === place?.id);
+  const placeMemories = React.useMemo(() => {
+    return memories.filter(
+        m => m.place_id === place?.id
+    );
+}, [memories, place]);
 
   const [rating, setRating] = useState(visitData?.rating ?? 0);
   const [notes, setNotes] = useState(visitData?.notes ?? '');
@@ -67,7 +76,7 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
     <Modal
       isOpen={isOpen}
       onClose={onClose}
-      title={place.name}
+      title={place?.name ?? "Unknown Place"}
       size="lg"
       footer={
         <>
@@ -233,7 +242,8 @@ export default function PlaceDetailModal({ place, isOpen, onClose }) {
         <div style={{ display: 'flex', gap: '8px', fontSize: '12px', color: 'var(--color-text-muted)', paddingTop: '4px' }}>
           <MapPin size={12} />
           <span>
-            {place.latitude?.toFixed(4)}, {place.longitude?.toFixed(4)}
+          {Number(place.latitude).toFixed(4)},
+          {Number(place.longitude).toFixed(4)}
           </span>
         </div>
       </div>

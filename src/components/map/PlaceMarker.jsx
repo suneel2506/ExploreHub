@@ -30,11 +30,25 @@ function createDivIcon(color, visited, wishlisted) {
 
 export default function PlaceMarker({ place, isVisited, isWishlisted, onClick }) {
   const color = CATEGORY_COLORS[place.category] ?? '#6B7280';
-  const icon = createDivIcon(color, isVisited, isWishlisted);
+  const icon = useMemo(() => {
+    return createDivIcon(color, isVisited, isWishlisted);
+}, [color, isVisited, isWishlisted]);
+
+if (
+  place.latitude == null ||
+  place.longitude == null
+) {
+  return null;
+}
 
   return (
     <Marker
-      position={[place.latitude, place.longitude]}
+    position={[
+      Number(place.latitude),
+      Number(place.longitude)
+  ]}
+  
+      
       icon={icon}
       eventHandlers={{ click: () => onClick?.(place) }}
     >
@@ -56,7 +70,10 @@ export default function PlaceMarker({ place, isVisited, isWishlisted, onClick })
             <div style={{ fontSize: 12, color: '#F59E0B', marginTop: 4 }}>♡ Wishlisted</div>
           )}
           <button
-            onClick={() => onClick?.(place)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onClick?.(place);
+          }}
             style={{
               marginTop: 8,
               width: '100%',

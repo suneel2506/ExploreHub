@@ -7,7 +7,15 @@ import { useUserDataStore } from '@/store/userDataStore';
 
 function ChangeView({ center, zoom }) {
   const map = useMap();
-  if (center) map.setView(center, zoom ?? map.getZoom());
+
+  useEffect(() => {
+    if (!center) return;
+
+    map.setView(center, zoom ?? map.getZoom(), {
+      animate: true
+    });
+  }, [center, zoom, map]);
+
   return null;
 }
 
@@ -58,6 +66,7 @@ export default function MapView({ places = [], onPlaceClick, flyTo, onBoundsChan
       zoom={MAP_DEFAULTS.zoom}
       style={{ width: '100%', height: '100%' }}
       zoomControl={true}
+      preferCanvas={true}
     >
       <TileLayer
         url={MAP_DEFAULTS.tileUrl}
@@ -71,8 +80,14 @@ export default function MapView({ places = [], onPlaceClick, flyTo, onBoundsChan
       {/* Emit bounds on pan/zoom for viewport-based loading */}
       {onBoundsChange && <BoundsWatcher onBoundsChange={onBoundsChange} />}
 
-      <MarkerClusterGroup chunkedLoading maxClusterRadius={50}>
-        {places.map((place) => (
+      <MarkerClusterGroup
+    chunkedLoading
+    chunkInterval={200}
+    chunkDelay={50}
+    removeOutsideVisibleBounds
+    maxClusterRadius={50}
+>
+{places.slice(0, 800).map(place => (
           <PlaceMarker
             key={place.id}
             place={place}
