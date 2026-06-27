@@ -5,11 +5,12 @@ import { useAuthStore } from '@/store/authStore';
 import { useUserDataStore } from '@/store/userDataStore';
 import { useToast } from '@/components/ui/Toast';
 import { CATEGORY_COLORS } from '@/lib/constants';
+import { supabase } from '@/lib/supabase';
 
 // ─── Wikipedia image cache (module-level, lives for session) ──────────────────
 const wikiCache = new Map(); // name → imageUrl | null
 
-async function fetchWikiImage(name) {
+async function fetchWikiImage(name, placeId) {
   if (!name) return null;
   const key = name.toLowerCase().trim();
   if (wikiCache.has(key)) return wikiCache.get(key);
@@ -25,6 +26,19 @@ async function fetchWikiImage(name) {
     // Bump thumbnail to 400px for better card quality
     const large = url ? url.replace(/\/\d+px-/, '/400px-') : null;
     wikiCache.set(key, large);
+
+    // Cache the fetched URL back to Supabase (fire-and-forget)
+    // This means next page load will use the cached URL directly.
+    if (large && placeId && supabase) {
+      supabase
+        .from('places')
+        .update({ image_url: large, image_source: 'wikipedia' })
+        .eq('id', placeId)
+        .is('image_url', null) // Only if not already set (safe: never overwrite)
+        .then(() => {})
+        .catch(() => {}); // Silent — caching failure is non-fatal
+    }
+
     return large;
   } catch {
     wikiCache.set(key, null);
@@ -96,7 +110,7 @@ function usePlaceImage(place) {
         if (entry.isIntersecting && !fetched.current) {
           fetched.current = true;
           obs.disconnect();
-          const url = await fetchWikiImage(place.name);
+          const url = await fetchWikiImage(place.name, place.id);
           if (url) setImgUrl(url);
         }
       },

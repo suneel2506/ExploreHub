@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { Compass, Plus, Loader } from 'lucide-react';
+import { Compass, Plus, Loader, Search } from 'lucide-react';
 import PageHeader from '@/components/layout/PageHeader';
 import PlaceFilters from '@/components/places/PlaceFilters';
 import PlaceCard from '@/components/places/PlaceCard';
@@ -24,7 +24,7 @@ function useDebounce(value, delay) {
 }
 
 export default function ExplorePage() {
-  const { places, customPlaces: storePlaces, totalCount, hasMore, loading, fetchPlaces, loadMore, fetchCustomPlaces } = usePlacesStore();
+  const { places, customPlaces: storePlaces, totalCount, hasMore, loading, discovering, fetchPlaces, loadMore, fetchCustomPlaces, discoverPlaces, searchContext } = usePlacesStore();
   const { visitedPlaces, wishlist, customPlaces: userCustom } = useUserDataStore();
   const { user } = useAuthStore();
 
@@ -139,6 +139,48 @@ export default function ExplorePage() {
                 >
                   {loading ? 'Loading...' : `Load More (${(totalCount - places.length).toLocaleString()} remaining)`}
                 </Button>
+              </div>
+            )}
+
+            {/* Discover More Places — shown when search has few results and location context exists */}
+            {debouncedSearch && allPlaces.length > 0 && allPlaces.length < 5 && searchContext && !discovering && (
+              <div style={{
+                display: 'flex',
+                justifyContent: 'center',
+                marginTop: '24px',
+                paddingBottom: '16px',
+              }}>
+                <Button
+                  variant="secondary"
+                  icon={<Search size={14} />}
+                  id="discover-more-btn"
+                  onClick={async () => {
+                    const firstPlace = allPlaces[0];
+                    if (firstPlace?.latitude && firstPlace?.longitude) {
+                      await discoverPlaces(
+                        firstPlace.latitude,
+                        firstPlace.longitude,
+                        { category: filters.category, search: debouncedSearch, sort: filters.sort }
+                      );
+                    }
+                  }}
+                >
+                  Discover more places near {searchContext.name || debouncedSearch}
+                </Button>
+              </div>
+            )}
+            {discovering && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                padding: '16px',
+                color: 'var(--color-text-muted)',
+                fontSize: '13px',
+              }}>
+                <Loader size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                Discovering new places from OpenStreetMap...
               </div>
             )}
           </>

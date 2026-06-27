@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { supabase } from '@/lib/supabase';
 import { PAGE_SIZE } from '@/lib/constants';
+import { discoverAndInsert } from '@/lib/discover';
 
 export const usePlacesStore = create((set, get) => ({
   places: [],
@@ -10,6 +11,7 @@ export const usePlacesStore = create((set, get) => ({
   hasMore: true,
   loading: false,
   searching: false,
+  discovering: false, // True while auto-discovering new places from OSM
   error: null,
 
   // Search context — when a search matches a city/state/district, store it for display
@@ -53,7 +55,13 @@ export const usePlacesStore = create((set, get) => ({
         state_name,
   
         country_name,
-        country_flag
+        country_flag,
+
+        wikidata_id,
+        wikipedia_title,
+        aliases,
+        heritage_status,
+        image_source
     `, { count: "exact" })
       .range(from, to);
 
@@ -304,4 +312,36 @@ if (cities && cities.latitude) {
   },
 
   resetPlaces: () => set({ places: [], page: 0, hasMore: true, totalCount: 0, searchContext: null }),
+
+  /**
+   * Discover new places near a location using OSM Overpass API.
+   * Deduplicates against existing places and inserts only new ones.
+   * After discovery, re-fetches places to show the new results.
+   * 
+   * @param {number} lat - Latitude to search around
+   * @param {number} lon - Longitude to search around
+   * @param {Object} filters - Current search filters (to re-fetch after discovery)
+   * @returns {Promise<{discovered: number, inserted: number}>}
+   */
+  discoverPlaces: async (lat, lon, filters = {}) => {
+    if (!supabase) return { discovered: 0, inserted: 0 };
+    set({ discovering: true });
+
+    try {
+      const result = await discoverAndInsert(lat, lon, 25000);
+      console.log(`[discover] Found ${result.discovered}, ${result.duplicates} dupes, inserted ${result.inserted}`);
+
+      // Re-fetch places to include newly discovered ones
+      if (result.inserted > 0) {
+        await get().fetchPlaces(filters, true);
+      }
+
+      set({ discovering: false });
+      return { discovered: result.discovered, inserted: result.inserted };
+    } catch (err) {
+      console.error('[discover] Error:', err.message);
+      set({ discovering: false });
+      return { discovered: 0, inserted: 0 };
+    }
+  },
 }));

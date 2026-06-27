@@ -136,10 +136,91 @@ useEffect(() => {
           )}
         </div>
 
+        {/* Heritage Status Badge — only shown if enrichment data exists */}
+        {place.heritage_status && (
+          <div
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 12px',
+              background: 'linear-gradient(135deg, rgba(217,119,6,0.15), rgba(245,158,11,0.1))',
+              border: '1px solid rgba(245,158,11,0.3)',
+              borderRadius: 'var(--radius-full)',
+              fontSize: '12px',
+              fontWeight: 600,
+              color: '#F59E0B',
+            }}
+          >
+            🏛️ {place.heritage_status}
+          </div>
+        )}
+
+        {/* Aliases — alternative names from Wikidata */}
+        {place.aliases && place.aliases.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' }}>
+            <span style={{ fontSize: '12px', color: 'var(--color-text-muted)', fontWeight: 500 }}>
+              Also known as:
+            </span>
+            {place.aliases.map((alias, i) => (
+              <span
+                key={i}
+                style={{
+                  padding: '2px 8px',
+                  background: 'var(--color-bg-tertiary)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 'var(--radius-full)',
+                  fontSize: '11px',
+                  color: 'var(--color-text-secondary)',
+                }}
+              >
+                {alias}
+              </span>
+            ))}
+          </div>
+        )}
+
         {/* Description */}
         {place.description && (
           <p style={{ fontSize: '14px', color: 'var(--color-text-secondary)', lineHeight: 1.7 }}>
             {place.description}
+          </p>
+        )}
+
+        {/* Wikipedia Link — only shown if enrichment data exists */}
+        {(place.wiki_url || place.wikipedia_title) && (
+          <a
+            href={place.wiki_url || `https://en.wikipedia.org/wiki/${encodeURIComponent((place.wikipedia_title || '').replace(/ /g, '_'))}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 12px',
+              background: 'var(--color-bg-tertiary)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '12px',
+              color: 'var(--color-text-secondary)',
+              textDecoration: 'none',
+              transition: 'border-color 150ms',
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.borderColor = 'var(--color-border-focus)'}
+            onMouseLeave={(e) => e.currentTarget.style.borderColor = 'var(--color-border)'}
+          >
+            📖 Read on Wikipedia
+          </a>
+        )}
+
+        {/* Image Source Attribution */}
+        {place.image_source && place.image_url && (
+          <p style={{ fontSize: '11px', color: 'var(--color-text-muted)', fontStyle: 'italic' }}>
+            Image: {place.image_source === 'wikimedia' ? 'Wikimedia Commons' :
+                    place.image_source === 'wikipedia' ? 'Wikipedia' :
+                    place.image_source === 'osm' ? 'OpenStreetMap' :
+                    place.image_source === 'user' ? 'User uploaded' :
+                    place.image_source}
           </p>
         )}
 
