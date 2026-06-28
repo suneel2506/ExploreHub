@@ -911,6 +911,7 @@ function isValidPlaceName(name) {
 async function enrichPlace(place) {
   // ── Skip junk place names ───────────────────────────────────────────────
   if (!isValidPlaceName(place.name)) {
+    log(`  ⏭️ [${place.id.substring(0,8)}] "${place.name}" → skipped (invalid_name)`);
     return { status: 'skipped', reason: 'invalid_name', fields: [] };
   }
   const enrichedFields = [];
@@ -924,24 +925,29 @@ async function enrichPlace(place) {
       .eq('is_manual_edit', true)
       .limit(1);
     if (manualEdit && manualEdit.length > 0) {
+      log(`  ⏭️ [${place.id.substring(0,8)}] "${place.name}" → skipped (manual_edit)`);
       return { status: 'skipped', reason: 'manual_edit', fields: [] };
     }
   } catch {}
 
-  // ── Check if source is still fresh ──────────────────────────────────────
+  // ── Only skip if FULLY enriched: has description AND image AND metadata ──
   if (!FRESH) {
+    const hasDescription = !!place.description && place.description.length > 10;
+    const hasImage = !!place.image_url && !place.image_url.includes('placeholder');
+    let hasMetadata = false;
     try {
-      const { data: src } = await supabase
-        .from('place_sources')
-        .select('next_fetch_after,status')
+      const { data: meta } = await supabase
+        .from('place_metadata')
+        .select('place_id')
         .eq('place_id', place.id)
-        .eq('source_name', 'enrichment_v2')
-        .limit(1)
-        .single();
-      if (src && src.status === 'success' && new Date(src.next_fetch_after) > new Date()) {
-        return { status: 'skipped', reason: 'cache_fresh', fields: [] };
-      }
+        .limit(1);
+      hasMetadata = meta && meta.length > 0;
     } catch {}
+
+    if (hasDescription && hasImage && hasMetadata) {
+      log(`  ⏭️ [${place.id.substring(0,8)}] "${place.name}" → skipped (fully_enriched)`);
+      return { status: 'skipped', reason: 'fully_enriched', fields: [] };
+    }
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1241,6 +1247,38 @@ async function enrichPlace(place) {
     } catch {}
   }
 
+  // ── Calculate quality score ──────────────────────────────────────────────
+  if (!DRY_RUN) {
+    try {
+      let score = 20;
+      const hasDesc = enrichedFields.includes('description');
+      const hasImg = enrichedFields.some(f => f.includes('image'));
+      const hasMeta = enrichedFields.includes('metadata');
+      const hasWiki = !!place.wiki_url || enrichedFields.includes('wiki_url');
+
+      if (place.latitude != null) score += 5;
+      if (hasDesc) score += 25;
+      if (hasImg) score += 15;
+      if (hasMeta) score += 10;
+      if (hasWiki) score += 15;
+      if (place.heritage_status) score += 7;
+      if (place.aliases && place.aliases.length > 0) score += 3;
+
+      await supabase.from('place_quality_scores').upsert({
+        place_id: place.id,
+        score: Math.min(100, score),
+        has_description: hasDesc,
+        has_image: hasImg,
+        has_metadata: hasMeta || !!place.wikidata_id,
+        has_history: !!place.wiki_url,
+        has_coordinates: place.latitude != null,
+        description_source: resolveMethod || 'wikipedia',
+        image_source: place.image_source || null,
+        last_scored_at: new Date().toISOString(),
+      }, { onConflict: 'place_id' });
+    } catch {}
+  }
+
   if (enrichedFields.length === 0) {
     return { status: 'not_found', reason: 'no_data_found', fields: [], method: resolveMethod };
   }
@@ -1258,6 +1296,7 @@ async function processWithWorkers(places, onProgress) {
   let index = 0;
   const results = { enriched: 0, skipped: 0, notFound: 0, errors: 0 };
   const methods = {};
+  const skipReasons = {};
 
   async function worker(workerId) {
     while (index < places.length) {
@@ -1274,9 +1313,12 @@ async function processWithWorkers(places, onProgress) {
             break;
           case 'not_found':
             results.notFound++;
+            log(`  🔍 [${place.id.substring(0,8)}] "${(place.name || '').substring(0,40)}" → not_found (${result.reason || 'no_data'})`);
             break;
           case 'skipped':
             results.skipped++;
+            const reason = result.reason || 'unknown';
+            skipReasons[reason] = (skipReasons[reason] || 0) + 1;
             break;
           default:
             results.errors++;
@@ -1284,8 +1326,9 @@ async function processWithWorkers(places, onProgress) {
 
         onProgress(i + 1, places.length, place, result);
       } catch (err) {
+        // A single place failure must NEVER stop the batch
         results.errors++;
-        console.error(`\n  ❌ [W${workerId}] ${place.name}: ${err.message}`);
+        console.error(`\n  ❌ [W${workerId}] [${place.id.substring(0,8)}] "${(place.name || '').substring(0,30)}": ${err.message}`);
       }
     }
   }
@@ -1297,7 +1340,7 @@ async function processWithWorkers(places, onProgress) {
   }
   await Promise.all(workerPromises);
 
-  return { ...results, methods };
+  return { ...results, methods, skipReasons };
 }
 
 // =============================================================================
@@ -1328,7 +1371,7 @@ async function main() {
   console.log('    6️⃣  Fallback chain');
   console.log('    7️⃣  Cache everything');
 
-  // Count total
+  // Count total places
   let countQuery = supabase.from('places').select('*', { count: 'exact', head: true });
   if (CATEGORY) countQuery = countQuery.eq('category', CATEGORY);
   const { count: totalPlaces } = await countQuery;
@@ -1342,83 +1385,130 @@ async function main() {
     return;
   }
 
-  // Load checkpoint
-  let globalOffset = 0;
+  // Load checkpoint — UUID-only cursor (safe for all characters)
   let globalEnriched = 0;
   let globalSkipped = 0;
   let globalNotFound = 0;
   let globalErrors = 0;
+  let cursorId = null;    // Cursor: last processed place UUID
 
   const checkpoint = loadCheckpoint();
   if (checkpoint) {
-    globalOffset = checkpoint.offset || 0;
     globalEnriched = checkpoint.enriched || 0;
     globalSkipped = checkpoint.skipped || 0;
     globalNotFound = checkpoint.notFound || 0;
     globalErrors = checkpoint.errors || 0;
-    console.log(`  ⏭️  Resuming from offset ${globalOffset} (${globalEnriched} enriched so far)\n`);
+    cursorId = checkpoint.cursorId || null;
+    const resumeTotal = globalEnriched + globalSkipped + globalNotFound + globalErrors;
+    console.log(`  ⏭️  Resuming from id ${cursorId ? cursorId.substring(0,8) + '...' : 'start'} (${resumeTotal} done, ${globalEnriched} enriched)\n`);
   }
 
   const startTime = Date.now();
-  let totalProcessed = globalOffset;
+  let totalProcessed = globalEnriched + globalSkipped + globalNotFound + globalErrors;
+  let allSkipReasons = {};
 
-  // Process in batches
+  // Process in batches using UUID-only cursor pagination
+  // UUID cursor is safe: no commas, parentheses, or special chars
+  let batchRetries = 0;
+  const MAX_BATCH_RETRIES = 3;
+  let consecutiveEmptyBatches = 0;
+
   while (totalProcessed < toProcess) {
-    const batchStart = totalProcessed;
     // Respect --limit: don't fetch more than remaining quota
     const remaining = toProcess - totalProcessed;
     const thisBatchSize = Math.min(BATCH_SIZE, remaining);
+
+    // Build query — UUID-only cursor, no string interpolation of place names
     let batchQuery = supabase
       .from('v_places_full')
-      .select('id, name, description, image_url, wiki_url, wikidata_id, wikipedia_title, wikipedia_page_id, category, osm_id, city_name, district_name, state_name, image_source, aliases, official_name, heritage_status, metadata, latitude, longitude')
-      // Filter out junk names at DB level: skip names starting with symbols/numbers
-      .gt('name', 'A');
+      .select('id, name, description, image_url, wiki_url, wikidata_id, wikipedia_title, wikipedia_page_id, category, osm_id, city_name, district_name, state_name, image_source, aliases, official_name, heritage_status, metadata, latitude, longitude');
 
     // --wiki-first: process places with existing wiki data first (near-100% hit rate)
     if (WIKI_FIRST) {
       batchQuery = batchQuery.not('wiki_url', 'is', null);
     }
 
-    // Filter by enriched_at IS NULL to skip already-enriched places
-    batchQuery = batchQuery.is('enriched_at', null);
+    // UUID-only cursor pagination — safe for ALL characters
+    if (cursorId) {
+      batchQuery = batchQuery.gt('id', cursorId);
+    }
 
+    // Order by UUID (stable, deterministic, safe)
     batchQuery = batchQuery
-      .order('name')
-      .range(batchStart, batchStart + thisBatchSize - 1);
+      .order('id', { ascending: true })
+      .limit(thisBatchSize);
 
     if (CATEGORY) batchQuery = batchQuery.eq('category', CATEGORY);
 
     const { data: batch, error: batchError } = await batchQuery;
 
     if (batchError) {
-      console.error(`\n  ❌ Batch fetch error: ${batchError.message}`);
-      globalErrors++;
-      totalProcessed += BATCH_SIZE; // Skip this batch to avoid infinite loop
-      await sleep(5000);
-      continue;
+      batchRetries++;
+      console.error(`\n  ❌ Batch fetch error (attempt ${batchRetries}/${MAX_BATCH_RETRIES}): ${batchError.message}`);
+      if (batchRetries >= MAX_BATCH_RETRIES) {
+        console.error('  ❌ Max retries reached for this cursor. Advancing cursor by 1 to skip problematic row...');
+        // Even on max retries, try to advance past the problem instead of stopping
+        batchRetries = 0;
+        if (cursorId) {
+          // Fetch just the next 1 row to advance past it
+          const { data: skipRow } = await supabase
+            .from('v_places_full')
+            .select('id, name')
+            .gt('id', cursorId)
+            .order('id', { ascending: true })
+            .limit(1);
+          if (skipRow && skipRow.length > 0) {
+            console.error(`  ⏭️ Skipping "${skipRow[0].name}" (${skipRow[0].id})`);
+            cursorId = skipRow[0].id;
+            globalErrors++;
+            totalProcessed++;
+            continue;
+          }
+        }
+        break;
+      }
+      await sleep(3000 * batchRetries);
+      continue; // Retry same cursor position
     }
+    batchRetries = 0; // Reset on success
 
     if (!batch || batch.length === 0) {
-      console.log('\n  ✅ No more places to process');
-      break;
+      consecutiveEmptyBatches++;
+      if (consecutiveEmptyBatches >= 2) {
+        console.log('\n  ✅ No more places to process');
+        break;
+      }
+      continue;
     }
+    consecutiveEmptyBatches = 0;
 
-    // Track progress within this batch without referencing batchResult
+    // Track progress within this batch
     let batchProgress = 0;
+    let batchEnriched = 0;
+    let batchSkippedCount = 0;
+    let batchNotFoundCount = 0;
 
     // Process batch with parallel workers
     const batchResult = await processWithWorkers(batch, (i, total, place, result) => {
       batchProgress++;
-      const currentTotal = batchStart + batchProgress;
+      if (result.status === 'enriched') batchEnriched++;
+      else if (result.status === 'skipped') batchSkippedCount++;
+      else if (result.status === 'not_found') batchNotFoundCount++;
+
+      const currentTotal = totalProcessed + batchProgress;
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
       const rate = (currentTotal / (elapsed || 1)).toFixed(1);
 
       if (result.status === 'enriched') {
         process.stdout.write(`\r  ✨ [${currentTotal}/${toProcess}] ${(place.name || '').substring(0, 30).padEnd(30)} → ${result.fields.slice(0, 3).join(', ')} (${result.method}) [${rate}/s]     `);
       } else if (batchProgress % 5 === 0) {
-        process.stdout.write(`\r  📊 ${currentTotal}/${toProcess} | ✨${globalEnriched} ⏭️${globalSkipped} 🔍${globalNotFound} | ${elapsed}s [${rate}/s]     `);
+        process.stdout.write(`\r  📊 ${currentTotal}/${toProcess} | ✨${globalEnriched + batchEnriched} ⏭️${globalSkipped + batchSkippedCount} 🔍${globalNotFound + batchNotFoundCount} | ${elapsed}s [${rate}/s]     `);
       }
     });
+
+    // Update cursor to last item in batch (UUID only — always safe)
+    const lastPlace = batch[batch.length - 1];
+    cursorId = lastPlace.id;
 
     // Update totals AFTER batch completes
     totalProcessed += batch.length;
@@ -1427,14 +1517,27 @@ async function main() {
     globalNotFound += batchResult.notFound;
     globalErrors += batchResult.errors;
 
-    // Checkpoint after each batch
+    // Merge skip reasons
+    if (batchResult.skipReasons) {
+      for (const [reason, count] of Object.entries(batchResult.skipReasons)) {
+        allSkipReasons[reason] = (allSkipReasons[reason] || 0) + count;
+      }
+    }
+
+    // Checkpoint after each batch (UUID cursor only)
     saveCheckpoint({
-      offset: totalProcessed,
+      cursorId,
       enriched: globalEnriched,
       skipped: globalSkipped,
       notFound: globalNotFound,
       errors: globalErrors,
     });
+
+    // Print batch summary every 5 batches
+    if (Math.floor(totalProcessed / BATCH_SIZE) % 5 === 0) {
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(0);
+      console.log(`\n  📦 Batch checkpoint: ${totalProcessed}/${toProcess} | ✨${globalEnriched} ⏭️${globalSkipped} 🔍${globalNotFound} ❌${globalErrors} | ${elapsed}s`);
+    }
   }
 
   // Final stats
@@ -1445,11 +1548,19 @@ async function main() {
   console.log(`  ✅ Enrichment pipeline v2 complete!`);
   console.log(`  ──────────────────────────────────────────────────────────`);
   console.log(`  📊 Processed:  ${totalProcessed.toLocaleString()}`);
-  console.log(`  ✨ Enriched:   ${globalEnriched.toLocaleString()}`);
+  console.log(`  ✨ Enriched:   ${globalEnriched.toLocaleString()} (${totalProcessed > 0 ? ((globalEnriched / totalProcessed) * 100).toFixed(1) : 0}%)`);
   console.log(`  ⏭️  Skipped:    ${globalSkipped.toLocaleString()}`);
   console.log(`  🔍 Not found:  ${globalNotFound.toLocaleString()}`);
   console.log(`  ❌ Errors:     ${globalErrors.toLocaleString()}`);
   console.log(`  ⏱️  Time:       ${elapsed}s (${rate} places/sec)`);
+
+  // Show skip reason breakdown
+  if (Object.keys(allSkipReasons).length > 0) {
+    console.log(`  ── Skip reasons ──────────────────────────────────────────`);
+    for (const [reason, count] of Object.entries(allSkipReasons).sort((a, b) => b[1] - a[1])) {
+      console.log(`     ${reason.padEnd(20)} ${count.toLocaleString()}`);
+    }
+  }
   console.log(`  ═══════════════════════════════════════════════════════════\n`);
 
   clearCheckpoint();

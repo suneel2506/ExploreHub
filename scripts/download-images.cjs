@@ -36,6 +36,7 @@ const ANON_KEY     = process.env.VITE_SUPABASE_ANON_KEY;
 const args       = process.argv.slice(2);
 const DRY_RUN    = args.includes('--dry-run');
 const RESUME     = args.includes('--resume');
+const DOWNLOAD   = args.includes('--download'); // Actually download images to Supabase Storage
 const LIMIT      = (() => { const i = args.indexOf('--limit');      return i >= 0 ? parseInt(args[i + 1], 10) : Infinity; })();
 const BATCH_SIZE = (() => { const i = args.indexOf('--batch-size'); return i >= 0 ? parseInt(args[i + 1], 10) : 100; })();
 
@@ -67,13 +68,91 @@ function clearCheckpoint() {
   try { if (fs.existsSync(CHECKPOINT_FILE)) fs.unlinkSync(CHECKPOINT_FILE); } catch {}
 }
 
+// ─── Image Download Helper ────────────────────────────────────────────────────
+const https = require('https');
+const http = require('http');
+const crypto = require('crypto');
+
+/**
+ * Download an image from a URL and upload to Supabase Storage.
+ * Returns { storagePath, storageUrl } on success, null on failure.
+ */
+async function downloadToStorage(imageUrl, placeId) {
+  if (!imageUrl || !placeId) return null;
+
+  return new Promise((resolve) => {
+    const client = imageUrl.startsWith('https') ? https : http;
+    const req = client.get(imageUrl, {
+      timeout: 20000,
+      headers: { 'User-Agent': 'ExploreHub/2.0 (travel app)' },
+    }, (response) => {
+      // Follow redirects
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        return downloadToStorage(response.headers.location, placeId).then(resolve);
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        return resolve(null);
+      }
+
+      const contentType = response.headers['content-type'] || 'image/jpeg';
+      const ext = contentType.includes('png') ? '.png'
+               : contentType.includes('webp') ? '.webp'
+               : '.jpg';
+
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', async () => {
+        try {
+          const buffer = Buffer.concat(chunks);
+          // Skip tiny images (likely broken/placeholder)
+          if (buffer.length < 5000) return resolve(null);
+          // Skip huge images (> 8MB)
+          if (buffer.length > 8 * 1024 * 1024) return resolve(null);
+
+          const hash = crypto.createHash('md5').update(buffer).digest('hex').substring(0, 8);
+          const storagePath = `places/${placeId.substring(0, 8)}/${hash}${ext}`;
+
+          const { error } = await supabase.storage
+            .from('place-images')
+            .upload(storagePath, buffer, {
+              contentType,
+              upsert: true,
+            });
+
+          if (error) {
+            // Bucket may not exist yet; skip silently
+            return resolve(null);
+          }
+
+          // Get public URL
+          const { data: urlData } = supabase.storage
+            .from('place-images')
+            .getPublicUrl(storagePath);
+
+          resolve({
+            storagePath,
+            storageUrl: urlData?.publicUrl || null,
+          });
+        } catch {
+          resolve(null);
+        }
+      });
+      response.on('error', () => resolve(null));
+    });
+    req.on('error', () => resolve(null));
+    req.on('timeout', () => { req.destroy(); resolve(null); });
+  });
+}
+
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log('\n🖼️  ExploreHub — Image Priority Resolver');
+  console.log(`\n🖼️  ExploreHub — Image Priority Resolver`);
   console.log('═══════════════════════════════════════════════════');
   console.log(`🔑 Auth: ${useServiceKey ? '✅ Service Role' : '🔑 Anon Key'}`);
-  if (DRY_RUN) console.log('🏃 DRY RUN mode');
+  if (DRY_RUN)  console.log('🏃 DRY RUN mode');
+  if (DOWNLOAD) console.log('📥 DOWNLOAD mode — will download images to Supabase Storage');
 
   // Step 1: Ensure all existing place images from places.image_url are in place_images
   console.log('\n  ⏳ Syncing existing place images to place_images table...');
@@ -192,12 +271,30 @@ async function main() {
             .eq('place_id', placeId)
             .eq('url', bestImage.url);
 
+          let finalUrl = bestImage.url;
+          let finalSource = bestImage.source;
+
+          // Download to Supabase Storage if --download flag and image is external
+          if (DOWNLOAD && !bestImage.storage_path && bestImage.url &&
+              (bestImage.url.includes('wikimedia') || bestImage.url.includes('wikipedia'))) {
+            const stored = await downloadToStorage(bestImage.url, placeId);
+            if (stored && stored.storageUrl) {
+              finalUrl = stored.storageUrl;
+              // Update place_images with storage path
+              await supabase
+                .from('place_images')
+                .update({ storage_path: stored.storagePath })
+                .eq('place_id', placeId)
+                .eq('url', bestImage.url);
+            }
+          }
+
           // Update places.image_url
           await supabase
             .from('places')
             .update({
-              image_url: bestImage.url,
-              image_source: bestImage.source,
+              image_url: finalUrl,
+              image_source: finalSource,
             })
             .eq('id', placeId);
 

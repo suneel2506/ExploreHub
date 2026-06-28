@@ -1,9 +1,34 @@
-import React from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Search, Filter } from 'lucide-react';
 import { PLACE_CATEGORIES, SORT_OPTIONS } from '@/lib/constants';
+import SearchSuggestions from '@/components/places/SearchSuggestions';
+import { useSearchStore } from '@/store/searchStore';
 
 export default function PlaceFilters({ filters, onChange }) {
   const setFilter = (key, value) => onChange({ ...filters, [key]: value });
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const addToHistory = useSearchStore((s) => s.addToHistory);
+  const searchWrapperRef = useRef(null);
+
+  // Close suggestions when clicking outside the search area
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (searchWrapperRef.current && !searchWrapperRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, []);
+
+  const handleSuggestionSelect = useCallback((suggestion) => {
+    const name = suggestion?.name || '';
+    if (name) {
+      addToHistory(name);
+      setFilter('search', name);
+    }
+    setShowSuggestions(false);
+  }, [addToHistory, setFilter]);
 
   return (
     <div
@@ -20,7 +45,7 @@ export default function PlaceFilters({ filters, onChange }) {
       {/* Search + Sort Row */}
       <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
         {/* Search */}
-        <div style={{ position: 'relative', flex: 1, minWidth: 200 }}>
+        <div ref={searchWrapperRef} style={{ position: 'relative', flex: 1, minWidth: 200 }}>
           <Search
             size={15}
             style={{
@@ -30,14 +55,20 @@ export default function PlaceFilters({ filters, onChange }) {
               transform: 'translateY(-50%)',
               color: 'var(--color-text-muted)',
               pointerEvents: 'none',
+              zIndex: 1,
             }}
           />
           <input
             id="places-search"
             type="text"
-            placeholder="Search places..."
+            placeholder="Search places, cities, states..."
             value={filters.search ?? ''}
-            onChange={(e) => setFilter('search', e.target.value)}
+            onChange={(e) => {
+              setFilter('search', e.target.value);
+              setShowSuggestions(true);
+            }}
+            onFocus={() => setShowSuggestions(true)}
+            autoComplete="off"
             style={{
               width: '100%',
               padding: '9px 12px 9px 38px',
@@ -50,8 +81,12 @@ export default function PlaceFilters({ filters, onChange }) {
               outline: 'none',
               transition: 'border-color 150ms',
             }}
-            onFocus={(e) => e.target.style.borderColor = 'var(--color-border-focus)'}
-            onBlur={(e) => e.target.style.borderColor = 'var(--color-border)'}
+          />
+          <SearchSuggestions
+            query={filters.search}
+            onSelect={handleSuggestionSelect}
+            onClose={() => setShowSuggestions(false)}
+            visible={showSuggestions}
           />
         </div>
 

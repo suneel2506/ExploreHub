@@ -7,7 +7,15 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext js,jsx"
+    "lint": "eslint . --ext js,jsx",
+    "enrich": "node scripts/enrich-pipeline.cjs",
+    "enrich:dry": "node scripts/enrich-pipeline.cjs --dry-run --verbose --limit 10",
+    "enrich:test": "node scripts/enrich-pipeline.cjs --verbose --limit 50",
+    "enrich:universal": "node scripts/enrich-universal.cjs --verbose",
+    "enrich:universal:dry": "node scripts/enrich-universal.cjs --dry-run --verbose --limit 100",
+    "enrich:quality": "node scripts/enrich-universal.cjs --quality-only --verbose",
+    "download-images": "node scripts/download-images.cjs",
+    "rebuild-search": "node scripts/rebuild-search-index.cjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",

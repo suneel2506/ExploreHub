@@ -1,310 +1,586 @@
-# ExploreHub Upgrade Prompt (Production Safe)
+# ExploreHub v3 - Universal Place Enrichment System
 
-You are a senior software architect and full-stack engineer.
+You are the Lead Software Architect for ExploreHub.
 
-This is a production-ready React + Vite + Supabase application called **ExploreHub**.
+IMPORTANT RULES
 
-The application is currently stable and fully functional.
-
-Current status:
-
-* 272,367 cities imported
-* 124,482 places imported
-* Explore page works
-* Search works
-* Pagination works
-* Map works
-* Marker clustering works
-* Place detail modal works
-* Authentication works
-* Wishlist works
-* Memories work
-* Visited places work
-
-## MOST IMPORTANT RULE
-
-Treat the current project as a production application.
-
-DO NOT rewrite working code.
-
-DO NOT refactor working code.
-
-DO NOT redesign the UI.
-
-DO NOT rename files.
-
-DO NOT change component structure.
-
-DO NOT remove existing functionality.
-
-DO NOT change APIs unless absolutely required.
-
-DO NOT modify any logic that is already working.
-
-Everything currently working must continue working exactly as before.
-
-Only ADD new features.
-
-If a change is required, make the smallest possible modification.
-
-Never replace a working implementation with a different one simply because it is "cleaner."
-
-Every modification must be backward compatible.
+* Do NOT rewrite the project.
+* Do NOT break any existing feature.
+* Do NOT redesign the UI.
+* Keep backward compatibility.
+* Analyze the current project before making any changes.
+* Modify only the minimum necessary code.
+* Every change must be production-ready.
+* Preserve database compatibility.
 
 ---
 
-## Objective
+## PROJECT GOAL
 
-Upgrade ExploreHub into a richer travel platform by expanding place data while preserving the current application.
+ExploreHub currently contains more than 124,000 OpenStreetMap places.
 
----
+The existing enrichment system works only for famous places because it depends mainly on Wikipedia and Wikidata.
 
-## Feature 1 — Multiple Data Sources
+This is NOT enough.
 
-Instead of relying only on OpenStreetMap, integrate multiple sources.
+I want EVERY place in the database to have meaningful information.
 
-Priority order:
-
-1. OpenStreetMap
-2. Wikidata
-3. Wikipedia
-4. Wikimedia Commons
-5. User uploaded images
+The objective is to create a Universal Multi-Tier Enrichment System.
 
 ---
 
-## Feature 2 — Real Images
+# UNIVERSAL ENRICHMENT ARCHITECTURE
 
-The current application shows placeholder category images.
+Every place must first be classified.
 
-Replace them with real place photographs.
+Examples:
 
-Image priority:
+UNESCO Site
 
-1. Existing image stored in Supabase
-2. Wikimedia Commons image
-3. Wikipedia image
-4. User uploaded image
-5. Placeholder image only if nothing exists
+Temple
 
-Never overwrite existing valid images.
+Church
 
-Cache downloaded image URLs inside Supabase.
+Mosque
 
-Never request the same image twice.
+Fort
+
+Palace
+
+Museum
+
+Monument
+
+Waterfall
+
+Lake
+
+River
+
+Beach
+
+Mountain
+
+Hill Station
+
+National Park
+
+Railway Station
+
+Metro Station
+
+Airport
+
+Bus Stand
+
+School
+
+College
+
+Hospital
+
+Restaurant
+
+Hotel
+
+Cafe
+
+Shop
+
+Market
+
+Government Office
+
+Village
+
+Town
+
+City
+
+Industrial Area
+
+Residential Area
+
+Park
+
+Garden
+
+Playground
+
+Forest
+
+Road
+
+Bridge
+
+Everything else
+
+Each category must have its own enrichment strategy.
+
+Never use one enrichment strategy for all categories.
 
 ---
 
-## Feature 3 — Automatic Data Enrichment
+# TIER 1
 
-For every imported place:
+Famous Tourist Places
 
-Automatically enrich:
+Sources
 
-* description
-* image
-* wikipedia url
-* wikidata id
-* heritage information
-* tourism information
-* aliases
-* official names
+Wikipedia
 
-Store everything in Supabase.
+↓
 
-Never fetch the same metadata twice.
+Wikidata
+
+↓
+
+Wikimedia Commons
+
+↓
+
+Official Website
+
+↓
+
+Government Tourism
+
+Store:
+
+Description
+
+History
+
+Architecture
+
+Opening Hours (if available)
+
+Coordinates
+
+Images
+
+Wikipedia URL
+
+Commons Images
+
+Official Website
+
+Metadata
 
 ---
 
-## Feature 4 — Incremental Import
+# TIER 2
 
-Do NOT recreate the database.
+Important Infrastructure
 
-Instead:
+Examples
 
-Detect places that have missing data.
+Railway Stations
 
-Only enrich those records.
+Airports
 
-Already imported places must remain untouched.
+Metro
+
+Bus Stations
+
+Ports
+
+Use
+
+OpenStreetMap
+
+Government Open Data
+
+Official Websites
+
+Wikipedia (if available)
+
+Generate AI summary if missing.
 
 ---
 
-## Feature 5 — Better Search
+# TIER 3
 
-When a user searches:
+Schools
+
+Hospitals
+
+Universities
+
+Government Buildings
+
+Use
+
+OSM
+
+Government Open Data
+
+Official Website
+
+Generate AI summary.
+
+---
+
+# TIER 4
+
+Restaurants
+
+Hotels
+
+Cafes
+
+Shops
+
+Markets
+
+Use
+
+OSM
+
+Website
+
+User Images
+
+User Reviews
+
+AI Summary
+
+Do NOT rely on Wikipedia.
+
+---
+
+# TIER 5
+
+Villages
+
+Cities
+
+Districts
+
+States
+
+Countries
+
+Use
+
+OSM
+
+Wikipedia
+
+Wikidata
+
+Government Census
+
+Generate statistical summaries.
+
+---
+
+# TIER 6
+
+Everything Else
+
+If no external source exists
+
+Automatically generate a useful description using available OSM tags.
+
+Example
+
+OSM Tags
+
+amenity=school
+
+name=ABC School
+
+city=Kanchipuram
+
+↓
+
+Generate
+
+"ABC School is an educational institution located in Kanchipuram, Tamil Nadu."
+
+Never leave descriptions empty.
+
+---
+
+# IMAGE STRATEGY
+
+Priority
+
+1 Wikimedia Commons
+
+2 Wikipedia
+
+3 Official Website
+
+4 User Uploaded Images
+
+5 Category Illustration
+
+Never use fake placeholder images if a real image exists.
+
+If no real image exists
+
+Use a professional category illustration
+
+Temple
+
+School
+
+Hospital
+
+Restaurant
+
+Railway Station
+
+Beach
+
+Museum
+
+etc.
+
+The UI should always display something meaningful.
+
+---
+
+# AI GENERATED SUMMARIES
+
+When no public description exists
+
+Generate summaries using OSM metadata.
+
+Examples
+
+Temple
+
+"XXXX Temple is a Hindu temple located in ..."
+
+Restaurant
+
+"XXXX is a local restaurant located in ..."
+
+School
+
+"XXXX School is an educational institution situated in ..."
+
+Hospital
+
+"XXXX Hospital provides healthcare services in ..."
+
+Railway Station
+
+"XXXX Railway Station serves the surrounding region and is part of ..."
+
+These summaries should clearly indicate that they are AI-generated.
+
+---
+
+# USER CONTRIBUTIONS
+
+Allow users to improve places.
+
+Users can add
+
+Photos
+
+Descriptions
+
+Corrections
+
+Opening Hours
+
+Accessibility
+
+Ratings
+
+Travel Tips
+
+These should supplement—not overwrite—official data.
+
+---
+
+# SEARCH
+
+Search must combine
+
+Place Name
+
+Category
+
+City
+
+District
+
+State
+
+Country
+
+Tourist Importance
+
+Nearby Famous Places
+
+Typing
 
 "Kanchipuram"
 
-The system should search:
+should return
 
-* place names
-* city
-* district
-* state
-* aliases
-* wikipedia titles
-* wikidata labels
+Ekambareswarar Temple
 
-If only a few places are found:
+Kamakshi Amman Temple
 
-Automatically discover additional tourist places for that location using OpenStreetMap and Wikidata.
+Kailasanathar Temple
 
-Insert only new places.
+Varadharaja Perumal Temple
 
-Never insert duplicates.
+Nearby Museums
 
----
+Nearby Hotels
 
-## Feature 6 — Duplicate Detection
+Nearby Restaurants
 
-Before inserting any place:
+Nearby Railway Station
 
-Check:
+Nearby Bus Stand
 
-* OSM ID
-* Wikidata ID
-* Coordinates
-* Name similarity
+Nearby Parks
 
-Prevent duplicates.
+Search should feel similar to Google Maps.
 
 ---
 
-## Feature 7 — Performance
+# PERFORMANCE
 
-The project must remain fast.
+Target
 
-Requirements:
+500,000+
 
-* Pagination must continue working.
-* Marker clustering must continue working.
-* Search must remain fast.
-* No full-table scans.
-* Use indexes.
-* Use batched inserts.
-* Use caching.
-* Use lazy loading.
-* Keep memory usage low.
+places.
 
----
+Implement
 
-## Feature 8 — Image Caching
+Materialized Views
 
-Never fetch images every time the app loads.
+Indexes
 
-When an image is downloaded:
+Caching
 
-Store its URL in Supabase.
+Pagination
 
-Next request must use the cached URL.
+Lazy Loading
 
----
+Background Enrichment Queue
 
-## Feature 9 — Safe Database Changes
+Parallel Workers
 
-Do not remove existing columns.
+Retry Queue
 
-Only add nullable columns if required.
+API Cache
 
-Create migrations.
-
-Do not destroy existing data.
+Never block the UI while enrichment runs.
 
 ---
 
-## Feature 10 — Code Quality
+# DATABASE
 
-Every change must include:
+Reuse existing tables whenever possible.
 
-* comments
-* error handling
-* retries
-* logging
-* loading states
+Only add new tables if necessary.
 
----
+Suggested additions
 
-## Existing UI
+category_templates
 
-Preserve:
+ai_generated_descriptions
 
-* Explore Page
-* Map
-* Place Detail Modal
-* Wishlist
-* Memories
-* Profile
-* Visited
-* Authentication
+user_contributions
 
-Pixel-perfect.
+image_sources
+
+enrichment_jobs
+
+place_quality_score
+
+Do not remove existing schema.
 
 ---
 
-## Existing Database
+# QUALITY SCORE
 
-Preserve every table.
+Each place should receive a score.
 
-Preserve every relationship.
+100
 
-Preserve every foreign key.
+Complete
 
-Preserve every index.
+Images
 
----
+Description
 
-## Existing React Components
+History
 
-Do not replace components.
+Metadata
 
-Only extend them.
+Nearby Places
 
----
+80
 
-## Existing Zustand Stores
+Has Image
 
-Do not rewrite stores.
+Description
 
-Only extend them.
+Metadata
 
----
+50
 
-## Existing Search
+OSM Only
 
-Do not replace.
+Generated Description
 
-Improve it.
+No Image
 
----
+20
 
-## Existing Importer
+Only Raw OSM
 
-Do not rewrite.
-
-Extend it.
+This score should determine whether the place needs further enrichment.
 
 ---
 
-## Existing APIs
+# VERIFICATION
 
-Remain compatible.
+After implementing every feature
 
----
+Verify database changes
 
-## Output Requirements
+Verify UI displays enriched data
 
-For every change:
+Verify images appear
 
-1. Explain why.
-2. Explain which files change.
-3. Show complete modified files only.
-4. Do not omit code.
-5. Preserve formatting.
-6. Preserve functionality.
-7. Ensure the project compiles after every step.
-8. Never introduce breaking changes.
+Verify search results improve
 
-The project must remain functional after every modification.
+Verify no existing feature breaks
 
-No regressions are acceptable.
+Run integration tests
+
+Generate a report showing
+
+Number of enriched places
+
+Images added
+
+Descriptions added
+
+AI summaries generated
+
+Categories covered
+
+Cache hit rate
+
+Failed enrichments
+
+Performance improvements
+
+Do not declare success until every verification passes.
+
+The final result should be a scalable, production-ready enrichment platform that gives every place in ExploreHub useful information, whether or not Wikipedia has an article for it.

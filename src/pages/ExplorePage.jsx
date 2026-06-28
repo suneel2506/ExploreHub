@@ -24,7 +24,7 @@ function useDebounce(value, delay) {
 }
 
 export default function ExplorePage() {
-  const { places, customPlaces: storePlaces, totalCount, hasMore, loading, discovering, fetchPlaces, loadMore, fetchCustomPlaces, discoverPlaces, searchContext } = usePlacesStore();
+  const { places, customPlaces: storePlaces, totalCount, hasMore, loading, discovering, fetchPlaces, loadMore, fetchCustomPlaces, discoverPlaces, searchContext, searchPlacesV2 } = usePlacesStore();
   const { visitedPlaces, wishlist, customPlaces: userCustom } = useUserDataStore();
   const { user } = useAuthStore();
 
@@ -34,16 +34,22 @@ export default function ExplorePage() {
 
   const debouncedSearch =
     useDebounce(
-        filters.search.length >= 3
+        filters.search.length >= 2
             ? filters.search
             : "",
-        800
+        400
     );
 
-  // Fetch from DB whenever category or debounced search changes
+  // Fetch from DB whenever category or debounced search changes.
+  // Use V2 RPC (multi-field fuzzy search across name/city/state/aliases) for search queries,
+  // standard fetchPlaces for browsing (no search term).
   useEffect(() => {
-    fetchPlaces({ category: filters.category, search: debouncedSearch, sort: filters.sort }, true);
-  }, [filters.category, debouncedSearch, filters.sort, fetchPlaces]);
+    if (debouncedSearch) {
+      searchPlacesV2(debouncedSearch, { category: filters.category, state: null }, true);
+    } else {
+      fetchPlaces({ category: filters.category, search: '', sort: filters.sort }, true);
+    }
+  }, [filters.category, debouncedSearch, filters.sort, fetchPlaces, searchPlacesV2]);
 
   // Also fetch user's custom places for display
   useEffect(() => {
@@ -69,7 +75,13 @@ export default function ExplorePage() {
     return [...custom.map((p) => ({ ...p, _isCustom: true })), ...filteredPlaces];
   }, [userCustom, filteredPlaces, filters.visited, filters.wishlist, visitedIds, wishlistIds]);
 
-  const handleLoadMore = () => loadMore({ category: filters.category, search: debouncedSearch, sort: filters.sort });
+  const handleLoadMore = () => {
+    if (debouncedSearch) {
+      searchPlacesV2(debouncedSearch, { category: filters.category }, false);
+    } else {
+      loadMore({ category: filters.category, search: '', sort: filters.sort });
+    }
+  };
 
   const displayCount = filteredPlaces.length + userCustom.length;
 

@@ -94,12 +94,13 @@ const CATEGORY_EMOJIS = {
  */
 function usePlaceImage(place) {
   const [imgUrl, setImgUrl] = useState(place.image_url || null);
+  const [imgFailed, setImgFailed] = useState(false);
   const fetched = useRef(false);
   const ref     = useRef(null);
 
   useEffect(() => {
     // If place already has an image, no need to fetch
-    if (place.image_url) { setImgUrl(place.image_url); return; }
+    if (place.image_url) { setImgUrl(place.image_url); setImgFailed(false); return; }
     if (fetched.current) return;
 
     const el = ref.current;
@@ -120,7 +121,10 @@ function usePlaceImage(place) {
     return () => obs.disconnect();
   }, [place.image_url, place.name]);
 
-  return { imgUrl, ref };
+  const handleImgError = () => { setImgFailed(true); };
+
+  // If image failed to load, treat as no image (show gradient)
+  return { imgUrl: imgFailed ? null : imgUrl, ref, handleImgError };
 }
 
 // ─── PlaceCard ────────────────────────────────────────────────────────────────
@@ -135,7 +139,7 @@ export default function PlaceCard({ place, onClick }) {
   const isWishlisted = wishlist.some((w) => w.place_id === place.id);
   const visitData   = visitedPlaces.find((v) => v.place_id === place.id);
 
-  const { imgUrl, ref } = usePlaceImage(place);
+  const { imgUrl, ref, handleImgError } = usePlaceImage(place);
 
   const handleVisit = async (e) => {
     e.stopPropagation();
@@ -201,7 +205,7 @@ export default function PlaceCard({ place, onClick }) {
             style={{ width: '100%', height: '100%', objectFit: 'cover', transition: 'transform 300ms' }}
             onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.05)'}
             onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
-            onError={(e) => { e.currentTarget.style.display = 'none'; }}
+            onError={handleImgError}
           />
         ) : (
           /* Beautiful category gradient fallback */

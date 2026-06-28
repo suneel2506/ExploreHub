@@ -27,6 +27,7 @@ export async function initStorage() {
   const buckets = [
     { name: 'photos', public: true, fileSizeLimit: 15 * 1024 * 1024 },   // 15 MB
     { name: 'videos', public: true, fileSizeLimit: 500 * 1024 * 1024 },  // 500 MB
+    { name: 'place-images', public: true, fileSizeLimit: 10 * 1024 * 1024 }, // 10 MB — enrichment images
   ];
   for (const b of buckets) {
     await supabase.storage.createBucket(b.name, {
