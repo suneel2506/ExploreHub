@@ -344,4 +344,106 @@ if (cities && cities.latitude) {
       return { discovered: 0, inserted: 0 };
     }
   },
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // NEW: Enhanced search using search_places_v2 RPC (cursor-paginated)
+  // These methods complement the existing fetchPlaces — they do NOT replace it.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  /**
+   * Search using the v2 RPC with cursor pagination.
+   * Falls back to existing fetchPlaces if RPC is not available.
+   * @param {string} query - Search query
+   * @param {Object} filters - { category, state }
+   * @param {boolean} reset - Reset results (true) or append (false)
+   */
+  searchPlacesV2: async (query, filters = {}, reset = true) => {
+    if (!supabase) return;
+    const state = get();
+
+    if (reset) {
+      set({ loading: true, searching: true, error: null, page: 0, hasMore: true, searchContext: null });
+    } else {
+      if (!state.hasMore) return;
+      set({ loading: true });
+    }
+
+    try {
+      // Build cursor from last item
+      const lastPlace = !reset && state.places.length > 0
+        ? state.places[state.places.length - 1]
+        : null;
+
+      const { data, error } = await supabase.rpc('search_places_v2', {
+        p_query: query || '',
+        p_category: filters.category && filters.category !== 'all' ? filters.category : null,
+        p_state: filters.state || null,
+        p_cursor_name: lastPlace?.name || null,
+        p_cursor_id: lastPlace?.id || null,
+        p_page_size: PAGE_SIZE,
+      });
+
+      if (error) {
+        // Fallback to existing search if RPC not available
+        console.warn('[placesStore] search_places_v2 RPC not available, falling back:', error.message);
+        return get().fetchPlaces({ search: query, ...filters }, reset);
+      }
+
+      const newPlaces = reset ? (data ?? []) : [...state.places, ...(data ?? [])];
+
+      // Detect search context from results
+      let searchContext = null;
+      if (data?.length > 0) {
+        const first = data[0];
+        if (first.match_type === 'state' && first.state_name) {
+          searchContext = { type: 'state', name: first.state_name, id: first.state_id };
+        } else if (first.match_type === 'district' && first.district_name) {
+          searchContext = { type: 'district', name: first.district_name, id: first.district_id };
+        } else if (first.match_type === 'city' && first.city_name) {
+          searchContext = { type: 'city', name: first.city_name, id: first.city_id };
+        }
+      }
+
+      set({
+        places: newPlaces,
+        totalCount: newPlaces.length, // Cursor pagination doesn't have exact count
+        page: (state.page || 0) + 1,
+        hasMore: (data ?? []).length === PAGE_SIZE,
+        loading: false,
+        searching: false,
+        searchContext,
+      });
+    } catch (err) {
+      set({ loading: false, searching: false, error: err.message });
+    }
+  },
+
+  /**
+   * Fetch multiple images for a place from place_images table.
+   * @param {string} placeId - Place UUID
+   * @returns {Promise<Array>} Array of image objects
+   */
+  fetchPlaceImages: async (placeId) => {
+    if (!supabase || !placeId) return [];
+    const { data } = await supabase
+      .from('place_images')
+      .select('id, url, source, is_primary, priority, attribution')
+      .eq('place_id', placeId)
+      .order('priority', { ascending: true });
+    return data || [];
+  },
+
+  /**
+   * Fetch tags for a place from place_tags + categories.
+   * @param {string} placeId - Place UUID
+   * @returns {Promise<Array>} Array of tag objects with name, emoji, group
+   */
+  fetchPlaceTags: async (placeId) => {
+    if (!supabase || !placeId) return [];
+    const { data } = await supabase
+      .from('place_tags')
+      .select('category_id, categories(id, name, slug, emoji, "group")')
+      .eq('place_id', placeId);
+    return (data || []).map(t => t.categories).filter(Boolean);
+  },
 }));
