@@ -62,9 +62,10 @@ const DRY_RUN    = args.includes('--dry-run');
 const FRESH      = args.includes('--fresh');
 const RESUME     = args.includes('--resume');
 const VERBOSE    = args.includes('--verbose');
+const WIKI_FIRST = args.includes('--wiki-first');  // Process places with existing wiki tags first
 const LIMIT      = (() => { const i = args.indexOf('--limit');      return i >= 0 ? parseInt(args[i + 1], 10) : Infinity; })();
 const BATCH_SIZE = (() => { const i = args.indexOf('--batch-size'); return i >= 0 ? parseInt(args[i + 1], 10) : 50; })();
-const WORKERS    = (() => { const i = args.indexOf('--workers');    return i >= 0 ? parseInt(args[i + 1], 10) : 4; })();
+const WORKERS    = (() => { const i = args.indexOf('--workers');    return i >= 0 ? parseInt(args[i + 1], 10) : 3; })();
 const CATEGORY   = (() => { const i = args.indexOf('--category');   return i >= 0 ? args[i + 1] : null; })();
 const CACHE_DAYS = 30;
 
@@ -120,7 +121,7 @@ class RateLimiter {
   }
 }
 
-const rateLimiter = new RateLimiter(10); // 10 req/s across all workers (conservative to avoid 429s)
+const rateLimiter = new RateLimiter(5); // 5 req/s across all workers (very conservative to avoid 429s)
 
 // ─── Checkpoint System ────────────────────────────────────────────────────────
 const CHECKPOINT_FILE = path.join(__dirname, '.enrich-pipeline-checkpoint.json');
@@ -1316,6 +1317,7 @@ async function main() {
   if (LIMIT < Infinity) console.log(`🔢 Limit:      ${LIMIT} places`);
   if (CATEGORY)         console.log(`📂 Category:   ${CATEGORY}`);
   if (VERBOSE)          console.log('📝 Verbose:    ON');
+  if (WIKI_FIRST)       console.log('🏷️  Priority:   Wiki-tagged places first');
 
   console.log('\n  Pipeline stages:');
   console.log('    1️⃣  Read OSM tags (wikidata, wikipedia, heritage...)');
@@ -1370,7 +1372,17 @@ async function main() {
       .from('v_places_full')
       .select('id, name, description, image_url, wiki_url, wikidata_id, wikipedia_title, wikipedia_page_id, category, osm_id, city_name, district_name, state_name, image_source, aliases, official_name, heritage_status, metadata, latitude, longitude')
       // Filter out junk names at DB level: skip names starting with symbols/numbers
-      .gt('name', 'A')
+      .gt('name', 'A');
+
+    // --wiki-first: process places with existing wiki data first (near-100% hit rate)
+    if (WIKI_FIRST) {
+      batchQuery = batchQuery.not('wiki_url', 'is', null);
+    }
+
+    // Filter by enriched_at IS NULL to skip already-enriched places
+    batchQuery = batchQuery.is('enriched_at', null);
+
+    batchQuery = batchQuery
       .order('name')
       .range(batchStart, batchStart + thisBatchSize - 1);
 
